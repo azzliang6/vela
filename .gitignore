@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+*.local
+src-tauri/target
+src-tauri/gen
+server/.env
+.DS_Store
+.shots
+
+# 邮箱授权码加密密钥（本机生成，绝不入库；丢失后需重新输入授权码）
+mail.key
+vela.config.json

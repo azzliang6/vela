@@ -1,0 +1,47 @@
+[package]
+name = "vela"
+version = "0.2.0"
+description = "Vela 轻帆 — 现代、美观、快速的跨平台邮件客户端"
+authors = ["Vela"]
+edition = "2021"
+
+[lib]
+name = "vela_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ── 邮件协议层：IMAP 收信 + SMTP 发信 + MIME 解析 ──
+# imap 用 native-tls，Windows 下走系统 schannel，无需安装 OpenSSL
+imap = { version = "2.4", default-features = false, features = ["tls"] }
+native-tls = "0.2"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "native-tls"] }
+# full_encoding 必须开启：否则 QQ/163 常见的 GBK 编码中文邮件会乱码
+mail-parser = { version = "0.11", features = ["full_encoding"] }
+base64 = "0.22"
+chrono = "0.4"
+
+# ── 邮箱授权码的本地加密存储（AES-256-GCM）──
+aes-gcm = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+
+# ── 内嵌同步服务（账户 / 邮件持久化）──
+axum = "0.8.9"
+tower-http = { version = "0.7.1", features = ["cors"] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "macros", "time", "sync"] }
+tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
+bcrypt = "0.19.3"
+uuid = { version = "1.26.1", features = ["v4"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
