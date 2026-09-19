@@ -1,6 +1,6 @@
 [package]
 name = "vela"
-version = "0.2.0"
+version = "0.2.1"
 description = "Vela 轻帆 — 现代、美观、快速的跨平台邮件客户端"
 authors = ["Vela"]
 edition = "2021"

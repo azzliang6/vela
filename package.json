@@ -1,13 +1,15 @@
 {
   "name": "vela-mail",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Vela 轻帆 — 现代、美观、快速的跨平台邮件客户端",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "android:prepare": "bash scripts/prepare_android.sh",
+    "android:build": "pnpm android:prepare && tauri android build --apk --ci",
     "tauri": "tauri"
   },
   "dependencies": {
