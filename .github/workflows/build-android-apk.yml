@@ -30,6 +30,8 @@ jobs:
           distribution: temurin
           java-version: 21
 
+      - uses: android-actions/setup-android@v3
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
@@ -41,8 +43,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Ensure Android 16 SDK is available
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Install Android 16 SDK and NDK
+        env:
+          NDK_VERSION: 27.3.13750724
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
       - name: Initialize Android project
         run: pnpm tauri android init --ci --skip-targets-install
