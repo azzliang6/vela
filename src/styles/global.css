@@ -1788,3 +1788,239 @@ kbd {
   border-top: 1px solid var(--line);
   background: var(--surface-2);
 }
+
+/* ———— AI 设置面板 ———— */
+.ai-dialog {
+  width: min(640px, 100%);
+}
+.ai-template-field > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-template-field .chip {
+  font-size: 11px;
+  gap: 4px;
+  padding: 3px 8px;
+}
+.ai-template {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--ink);
+}
+.ai-template:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.chip.ai-reanalyze {
+  margin-left: auto;
+  cursor: pointer;
+  font-size: 10.5px;
+  padding: 2px 9px;
+}
+.chip.ai-reanalyze:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.ai-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.ai-toggle input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ———— HTML 正文渲染 ———— */
+.mail-html-wrap {
+  margin-bottom: 24px;
+}
+.mail-html {
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.mail-html-tip {
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ———— 侧边栏写信按钮 ———— */
+.compose-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  transition: filter 0.14s, transform 0.14s;
+}
+.compose-btn:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.compose-btn:active {
+  transform: translateY(0);
+}
+
+/* ———— 手机 / 窄屏适配 ———— */
+/* 桌面端：抽屉容器透明化，让 .sidebar 直接成为三栏 grid 的第一列 */
+.side-drawer {
+  display: contents;
+}
+.nav-toggle,
+.back-btn {
+  display: none;
+}
+.drawer-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .app {
+    display: block;
+    height: 100dvh;
+  }
+
+  /* 抽屉侧边栏 */
+  .side-drawer {
+    display: block;
+  }
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgb(0 0 0 / 45%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .side-drawer.open .drawer-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .side-drawer .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 41;
+    width: min(300px, 85vw);
+    transform: translateX(-105%);
+    transition: transform 0.22s ease;
+    box-shadow: 0 0 40px rgb(0 0 0 / 25%);
+  }
+  .side-drawer.open .sidebar {
+    transform: none;
+  }
+
+  /* 左上角汉堡按钮 */
+  .nav-toggle {
+    display: inline-flex;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 39;
+  }
+
+  /* 列表占满全屏；选中邮件时阅读页全屏覆盖 */
+  .mail-list-pane {
+    width: 100%;
+  }
+  .reader-pane {
+    display: none;
+  }
+  .reader-pane.has-mail {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: var(--paper);
+  }
+  .back-btn {
+    display: inline-flex;
+  }
+
+  /* 弹层在小屏上贴边、内部滚动 */
+  .compose-wrap {
+    padding: 10px;
+  }
+  .compose-wrap .compose {
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    overflow-y: auto;
+  }
+
+  /* 汉堡按钮浮在左上角,列表头部让出空间(状态栏 + 按钮高度) */
+  .list-head {
+    padding-top: 88px;
+  }
+  /* 窄屏上密度切换会被裁掉,隐藏(手机用不到) */
+  .list-tools .seg[aria-label="列表密度"] {
+    display: none;
+  }
+
+  /* HTML 正文 iframe 占更高比例 */
+  .mail-html {
+    height: 62dvh;
+  }
+
+  /* 刘海屏/手势条安全区 */
+  .side-drawer .sidebar {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+  .list-head {
+    padding-left: calc(18px + env(safe-area-inset-left));
+  }
+}
+
+/* 设置分组小标题 */
+.settings-section-label {
+  margin-top: 4px;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* 侧栏底部的同步状态行(替代原头像/用户名) */
+.side-sync-status {
+  padding: 6px 8px 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

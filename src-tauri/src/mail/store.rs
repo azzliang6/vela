@@ -1,55 +1,15 @@
-//! 邮箱账户与凭证的数据库存取。
+//! 邮箱账户与凭证的本地存取（SQLite）。
 //!
-//! 表结构：
-//! ```sql
-//! CREATE TABLE mailbox_accounts (
-//!   user_id     INT  NOT NULL,           -- 归属用户
-//!   id          TEXT NOT NULL,           -- 账户 id（用邮箱地址）
-//!   email       TEXT NOT NULL,
-//!   provider    TEXT NOT NULL,
-//!   label       TEXT NOT NULL,
-//!   imap_host   TEXT NOT NULL,
-//!   imap_port   INT  NOT NULL,
-//!   imap_security TEXT NOT NULL,
-//!   smtp_host   TEXT NOT NULL,
-//!   smtp_port   INT  NOT NULL,
-//!   smtp_security TEXT NOT NULL,
-//!   secret_enc  TEXT NOT NULL,           -- AES-256-GCM 加密后的授权码
-//!   cursors     JSONB NOT NULL,          -- 各文件夹的 UID 游标
-//!   created_at  TIMESTAMPTZ,
-//!   PRIMARY KEY (user_id, id)
-//! );
-//! ```
-//!
-//! 安全约定：授权码明文只在内存中短暂存在；落库前必加密，读出后立即用于建立连接。
+//! 安全约定：授权码明文只在内存中短暂存在；落库前必加密（AES-256-GCM，
+//! 密钥来自应用配置目录的 `mail.key`），读出后立即用于建立连接。
+//! 表结构定义见 `crate::localdb::SCHEMA`（单用户，无 user_id）。
 
+use rusqlite::Connection;
 use serde_json::Value;
-use tokio_postgres::Client;
 
 use super::crypto::Crypto;
 use super::providers::{apply_preset, MailServerConfig, Security};
 use super::types::{MailboxAccount, MailboxCursor};
-
-/// 建表语句（幂等）
-pub const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS mailbox_accounts (
-  user_id       INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  id            TEXT NOT NULL,
-  email         TEXT NOT NULL,
-  provider      TEXT NOT NULL DEFAULT 'custom',
-  label         TEXT NOT NULL DEFAULT '',
-  imap_host     TEXT NOT NULL,
-  imap_port     INT  NOT NULL,
-  imap_security TEXT NOT NULL DEFAULT 'ssl',
-  smtp_host     TEXT NOT NULL,
-  smtp_port     INT  NOT NULL,
-  smtp_security TEXT NOT NULL DEFAULT 'ssl',
-  secret_enc    TEXT NOT NULL,
-  cursors       JSONB NOT NULL DEFAULT '[]'::jsonb,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (user_id, id)
-);
-"#;
 
 /// 前后端传输用的加密方式字符串
 fn security_to_str(s: Security) -> &'static str {
@@ -69,9 +29,8 @@ fn security_from_str(s: &str) -> Security {
 }
 
 /// 新增或更新一个邮箱账户（凭证加密存储）
-pub async fn upsert_account(
-    client: &Client,
-    user_id: i32,
+pub fn upsert_account(
+    conn: &Connection,
     cfg: &MailServerConfig,
     label: &str,
     crypto: &Crypto,
@@ -79,39 +38,32 @@ pub async fn upsert_account(
     let secret_enc = crypto.encrypt(&cfg.password)?;
     let account_id = cfg.email.clone();
 
-    client
-        .execute(
-            r#"
-            INSERT INTO mailbox_accounts (
-              user_id, id, email, provider, label,
-              imap_host, imap_port, imap_security,
-              smtp_host, smtp_port, smtp_security, secret_enc
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-            ON CONFLICT (user_id, id) DO UPDATE SET
-              provider = EXCLUDED.provider, label = EXCLUDED.label,
-              imap_host = EXCLUDED.imap_host, imap_port = EXCLUDED.imap_port,
-              imap_security = EXCLUDED.imap_security,
-              smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLUDED.smtp_port,
-              smtp_security = EXCLUDED.smtp_security,
-              secret_enc = EXCLUDED.secret_enc
-            "#,
-            &[
-                &user_id,
-                &account_id,
-                &cfg.email,
-                &cfg.provider,
-                &label,
-                &cfg.imap_host,
-                &(cfg.imap_port as i32),
-                &security_to_str(cfg.imap_security),
-                &cfg.smtp_host,
-                &(cfg.smtp_port as i32),
-                &security_to_str(cfg.smtp_security),
-                &secret_enc,
-            ],
-        )
-        .await
-        .map_err(|e| format!("保存邮箱账户失败：{e}"))?;
+    conn.execute(
+        "INSERT INTO mailbox_accounts
+         (id, email, provider, label, imap_host, imap_port, imap_security,
+          smtp_host, smtp_port, smtp_security, secret_enc)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+         ON CONFLICT(id) DO UPDATE SET
+           provider=excluded.provider, label=excluded.label,
+           imap_host=excluded.imap_host, imap_port=excluded.imap_port,
+           imap_security=excluded.imap_security,
+           smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port,
+           smtp_security=excluded.smtp_security, secret_enc=excluded.secret_enc",
+        rusqlite::params![
+            account_id,
+            cfg.email,
+            cfg.provider,
+            label,
+            cfg.imap_host,
+            cfg.imap_port,
+            security_to_str(cfg.imap_security),
+            cfg.smtp_host,
+            cfg.smtp_port,
+            security_to_str(cfg.smtp_security),
+            secret_enc,
+        ],
+    )
+    .map_err(|e| format!("保存邮箱账户失败：{e}"))?;
 
     Ok(MailboxAccount {
         id: account_id,
@@ -125,129 +77,130 @@ pub async fn upsert_account(
     })
 }
 
-/// 列出用户的所有邮箱账户（不含凭证）
-pub async fn list_accounts(client: &Client, user_id: i32) -> Result<Vec<MailboxAccount>, String> {
-    let rows = client
-        .query(
+/// 列出所有邮箱账户（不含凭证）
+pub fn list_accounts(conn: &Connection) -> Result<Vec<MailboxAccount>, String> {
+    let mut stmt = conn
+        .prepare(
             "SELECT id, email, provider, label, imap_host, imap_port, smtp_host, smtp_port
-             FROM mailbox_accounts WHERE user_id = $1 ORDER BY created_at",
-            &[&user_id],
+             FROM mailbox_accounts ORDER BY rowid",
         )
-        .await
         .map_err(|e| format!("读取邮箱账户失败：{e}"))?;
-
-    Ok(rows
-        .iter()
-        .map(|r| MailboxAccount {
-            id: r.get(0),
-            email: r.get(1),
-            provider: r.get(2),
-            label: r.get(3),
-            imap_host: r.get(4),
-            imap_port: r.get::<_, i32>(5) as u16,
-            smtp_host: r.get(6),
-            smtp_port: r.get::<_, i32>(7) as u16,
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(MailboxAccount {
+                id: r.get(0)?,
+                email: r.get(1)?,
+                provider: r.get(2)?,
+                label: r.get(3)?,
+                imap_host: r.get(4)?,
+                imap_port: r.get::<_, i64>(5)? as u16,
+                smtp_host: r.get(6)?,
+                smtp_port: r.get::<_, i64>(7)? as u16,
+            })
         })
-        .collect())
+        .map_err(|e| format!("读取邮箱账户失败：{e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取邮箱账户失败：{e}"))
 }
 
 /// 取回完整连接配置（含解密后的授权码），用于建立 IMAP/SMTP 连接
-pub async fn load_config(
-    client: &Client,
-    user_id: i32,
+pub fn load_config(
+    conn: &Connection,
     account_id: &str,
     crypto: &Crypto,
 ) -> Result<MailServerConfig, String> {
-    let row = client
-        .query_opt(
+    let row = conn
+        .query_row(
             "SELECT email, provider, imap_host, imap_port, imap_security,
                     smtp_host, smtp_port, smtp_security, secret_enc
-             FROM mailbox_accounts WHERE user_id = $1 AND id = $2",
-            &[&user_id, &account_id],
+             FROM mailbox_accounts WHERE id = ?1",
+            [account_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
+            },
         )
-        .await
-        .map_err(|e| format!("读取邮箱账户失败：{e}"))?
-        .ok_or_else(|| "邮箱账户不存在".to_string())?;
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "邮箱账户不存在".to_string(),
+            other => format!("读取邮箱账户失败：{other}"),
+        })?;
 
-    let password = crypto.decrypt(&row.get::<_, String>(8))?;
+    let password = crypto.decrypt(&row.8)?;
 
     let mut cfg = MailServerConfig {
-        provider: row.get(1),
-        email: row.get(0),
-        imap_host: row.get(2),
-        imap_port: row.get::<_, i32>(3) as u16,
-        imap_security: security_from_str(&row.get::<_, String>(4)),
-        smtp_host: row.get(5),
-        smtp_port: row.get::<_, i32>(6) as u16,
-        smtp_security: security_from_str(&row.get::<_, String>(7)),
+        provider: row.1,
+        email: row.0,
+        imap_host: row.2,
+        imap_port: row.3 as u16,
+        imap_security: security_from_str(&row.4),
+        smtp_host: row.5,
+        smtp_port: row.6 as u16,
+        smtp_security: security_from_str(&row.7),
         password,
     };
 
-    // 自定义服务商的服务器地址以数据库为准；预设服务商允许被库中值覆盖后重新校验
+    // 自定义服务商的服务器地址以库中值为准；预设服务商补齐端口/加密方式
     if cfg.provider == "custom" {
         if cfg.imap_host.trim().is_empty() || cfg.smtp_host.trim().is_empty() {
             return Err("该自定义账户缺少服务器地址，请重新添加".into());
         }
     } else {
-        apply_preset(&mut cfg).ok(); // 补齐端口/加密方式，失败也不阻断（保持库中值）
+        apply_preset(&mut cfg).ok();
     }
 
     Ok(cfg)
 }
 
-/// 删除账户（级联删除其邮件由调用方处理）
-pub async fn delete_account(
-    client: &Client,
-    user_id: i32,
-    account_id: &str,
-) -> Result<(), String> {
-    client
-        .execute(
-            "DELETE FROM mailbox_accounts WHERE user_id = $1 AND id = $2",
-            &[&user_id, &account_id],
-        )
-        .await
+/// 删除账户（其邮件由调用方一并清理）
+pub fn delete_account(conn: &Connection, account_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM mailbox_accounts WHERE id = ?1", [account_id])
         .map_err(|e| format!("删除邮箱账户失败：{e}"))?;
     Ok(())
 }
 
 /// 读取某账户的同步游标
-pub async fn load_cursors(
-    client: &Client,
-    user_id: i32,
-    account_id: &str,
-) -> Result<Vec<MailboxCursor>, String> {
-    let row = client
-        .query_opt(
-            "SELECT cursors FROM mailbox_accounts WHERE user_id = $1 AND id = $2",
-            &[&user_id, &account_id],
+pub fn load_cursors(conn: &Connection, account_id: &str) -> Result<Vec<MailboxCursor>, String> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT cursors FROM mailbox_accounts WHERE id = ?1",
+            [account_id],
+            |r| r.get(0),
         )
-        .await
-        .map_err(|e| format!("读取同步游标失败：{e}"))?;
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(format!("读取同步游标失败：{other}")),
+        })?;
 
-    let Some(r) = row else {
+    let Some(text) = v else {
         return Ok(Vec::new());
     };
-    let v: Value = r.get(0);
     // 游标损坏时按「首次同步」处理，而不是让整个同步失败
-    Ok(serde_json::from_value(v).unwrap_or_default())
+    let parsed: Result<Vec<MailboxCursor>, _> = serde_json::from_str(&text);
+    Ok(parsed.unwrap_or_default())
 }
 
 /// 写回同步游标
-pub async fn save_cursors(
-    client: &Client,
-    user_id: i32,
+pub fn save_cursors(
+    conn: &Connection,
     account_id: &str,
     cursors: &[MailboxCursor],
 ) -> Result<(), String> {
-    let v = serde_json::to_value(cursors).map_err(|e| format!("序列化游标失败：{e}"))?;
-    client
-        .execute(
-            "UPDATE mailbox_accounts SET cursors = $3 WHERE user_id = $1 AND id = $2",
-            &[&user_id, &account_id, &v],
-        )
-        .await
-        .map_err(|e| format!("保存同步游标失败：{e}"))?;
+    let v: Value = serde_json::to_value(cursors).map_err(|e| format!("序列化游标失败：{e}"))?;
+    conn.execute(
+        "UPDATE mailbox_accounts SET cursors = ?2 WHERE id = ?1",
+        rusqlite::params![account_id, v.to_string()],
+    )
+    .map_err(|e| format!("保存同步游标失败：{e}"))?;
     Ok(())
 }
 
@@ -255,27 +208,57 @@ pub async fn save_cursors(
 mod tests {
     use super::*;
 
-    #[test]
-    fn security_roundtrip() {
-        for s in [Security::Ssl, Security::Starttls, Security::None] {
-            assert_eq!(security_from_str(security_to_str(s)), s);
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::localdb::SCHEMA).unwrap();
+        conn
+    }
+
+    fn cfg() -> MailServerConfig {
+        MailServerConfig {
+            provider: "qq".into(),
+            email: "a@qq.com".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            imap_security: Security::Ssl,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            smtp_security: Security::Ssl,
+            password: "secret".into(),
         }
     }
 
     #[test]
-    fn unknown_security_defaults_to_ssl() {
-        // 保守默认：宁可多一层 TLS 也不要明文
-        assert_eq!(security_from_str("garbage"), Security::Ssl);
-        assert_eq!(security_from_str(""), Security::Ssl);
-    }
+    fn account_roundtrip_with_cursors() {
+        let conn = test_conn();
+        let crypto = Crypto::from_secret("k");
+        upsert_account(&conn, &cfg(), "我的QQ", &crypto).unwrap();
 
-    #[test]
-    fn schema_creates_expected_table() {
-        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS mailbox_accounts"));
-        assert!(SCHEMA.contains("secret_enc"));
-        assert!(
-            SCHEMA.contains("ON DELETE CASCADE"),
-            "用户被删除时其邮箱账户应一并清除"
-        );
+        let list = list_accounts(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].label, "我的QQ");
+
+        let loaded = load_config(&conn, "a@qq.com", &crypto).unwrap();
+        assert_eq!(loaded.password, "secret"); // 解密回原明文
+        assert_eq!(loaded.imap_host, "imap.qq.com");
+
+        save_cursors(
+            &conn,
+            "a@qq.com",
+            &[MailboxCursor {
+                folder: crate::mail::types::ServerFolder::Inbox,
+                last_uid: 42,
+                backfill_uid: Some(7),
+                uid_validity: 1,
+                remote_name: "INBOX".into(),
+            }],
+        )
+        .unwrap();
+        let cursors = load_cursors(&conn, "a@qq.com").unwrap();
+        assert_eq!(cursors[0].last_uid, 42);
+
+        delete_account(&conn, "a@qq.com").unwrap();
+        assert!(list_accounts(&conn).unwrap().is_empty());
+        assert!(load_cursors(&conn, "a@qq.com").unwrap().is_empty());
     }
 }

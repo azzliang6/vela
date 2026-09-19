@@ -14,6 +14,8 @@ import {
   Rows3,
   Search,
   Send,
+  Settings2,
+  Sparkles,
   Star,
   Sun,
   Trash2,
@@ -104,6 +106,31 @@ export function CommandPalette() {
         hint: "T",
         run: () => actions.toggleTheme(),
       },
+      {
+        id: "ai-settings",
+        group: "操作",
+        icon: Settings2,
+        title: "设置 · 同步频率与 AI",
+        run: () => actions.openAiSettings(),
+      },
+      {
+        id: "ai-analyze-all",
+        group: "操作",
+        icon: Sparkles,
+        title: "AI 分析 · 全部未分析邮件",
+        run: () => actions.analyzeAll(),
+      },
+      ...(selectedEmail
+        ? ([
+            {
+              id: "ai-analyze",
+              group: "操作",
+              icon: Sparkles,
+              title: `AI 分析 · ${selectedEmail.subject.slice(0, 20)}`,
+              run: () => actions.analyze(selectedEmail.id),
+            },
+          ] as PalItem[])
+        : []),
       {
         id: "density-cozy",
         group: "操作",

@@ -27,6 +27,16 @@ pub struct FetchResult {
     pub cursors: Vec<MailboxCursor>,
     /// 因解析失败或超出上限被跳过的邮件数
     pub skipped: usize,
+    /// 各文件夹当前在服务器上的完整 UID 列表。
+    /// 前端据此剔除「在服务器上已被删除 / 归档」的本地陈旧副本，保持两侧一致。
+    pub present: Vec<FolderUids>,
+}
+
+/// 某个文件夹在服务器上的全部 UID
+#[derive(Debug)]
+pub struct FolderUids {
+    pub folder: ServerFolder,
+    pub uids: Vec<u32>,
 }
 
 /// 单次同步每个文件夹最多下载的邮件数，避免首次接入拉取上万封导致长时间卡顿。
@@ -363,6 +373,11 @@ fn parse_message(
         .or_else(|| parsed.body_html(0).map(|h| html_to_text(&h)))
         .unwrap_or_default();
 
+    // HTML 版本单独保留（截断到与正文相同的上限），前端用它渲染图片等富文本
+    let html_body = parsed
+        .body_html(0)
+        .map(|h| truncate(h.into_owned(), MAX_BODY_CHARS));
+
     let attachments: Vec<FetchedAttachment> = parsed
         .attachments()
         .map(|part| FetchedAttachment {
@@ -390,6 +405,7 @@ fn parse_message(
         to: collect(parsed.to()),
         cc: collect(parsed.cc()),
         body: truncate(body, MAX_BODY_CHARS),
+        html_body,
         date: parsed
             .date()
             .map(|d| d.to_rfc3339())
@@ -547,6 +563,12 @@ pub fn sync_account(cfg: &MailServerConfig, cursors: &[MailboxCursor]) -> Result
             c.and_then(|c| c.backfill_uid),
             &mut result,
         )?;
+        // 服务器当前的全量 UID，用于前端剔除本地陈旧副本（网页上删了/归档了的邮件）
+        let uids = list_uids(&mut session, "1:*", "INBOX")?
+            .into_iter()
+            .map(|(u, _, _)| u)
+            .collect();
+        result.present.push(FolderUids { folder: ServerFolder::Inbox, uids });
     }
 
     // 已发送：各服务商命名不同，先探测真实名字
@@ -562,6 +584,11 @@ pub fn sync_account(cfg: &MailServerConfig, cursors: &[MailboxCursor]) -> Result
             c.and_then(|c| c.backfill_uid),
             &mut result,
         )?;
+        let uids = list_uids(&mut session, "1:*", &sent_name)?
+            .into_iter()
+            .map(|(u, _, _)| u)
+            .collect();
+        result.present.push(FolderUids { folder: ServerFolder::Sent, uids });
     }
 
     let _ = session.logout();

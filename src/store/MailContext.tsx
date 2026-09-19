@@ -4,6 +4,7 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   type Dispatch,
   type ReactNode,
 } from "react";
@@ -22,12 +23,15 @@ import { avatarColor } from "../types";
 import { ACCOUNTS, MOCK_EMAILS } from "../data/mockData";
 import { filterEmails } from "../services/mailService";
 import { analyzeEmail, classifyRules } from "../services/classifyService";
-import { api, type ServerEmail } from "../services/api";
+import { deleteEmails, getEmails, isDesktop, syncEmails, type ServerEmail } from "../services/api";
 import { realMail, realMailSupported } from "../services/realMailService";
+import { aiConfigured, analyzeWithAi, loadAiSettings, type AiSettings as AiSettingsType } from "../services/aiService";
+import { errText } from "../services/errText";
 
 export type Theme = "light" | "dark";
 
 /** null = 未登录（显示登录页）；guest = 游客模式（localStorage）；user = PG 账户 */
+/** 本地单用户:桌面/手机恒为 user(无账号体系);浏览器开发模式为 guest 演示 */
 export type AuthState =
   | { mode: "user"; username: string; token: string }
   | { mode: "guest" }
@@ -55,6 +59,14 @@ interface State {
   syncing: boolean;
   /** 接入真实邮箱的向导是否打开 */
   addMailboxOpen: boolean;
+  /** AI 设置面板是否打开 */
+  aiSettingsOpen: boolean;
+  /** 正在等待 LLM 返回的邮件 id */
+  aiLoadingId: string | null;
+  /** 后台自动检查新邮件的间隔（分钟）；0 = 仅手动同步 */
+  syncIntervalMin: number;
+  /** 上次成功检查新邮件的时间戳；null = 本次会话还没同步过 */
+  lastSyncAt: number | null;
 }
 
 type Action =
@@ -93,17 +105,25 @@ type Action =
   | { type: "realMailboxes"; mailboxes: RealMailbox[] }
   | { type: "syncing"; on: boolean }
   | { type: "addMailbox"; open: boolean }
+  | { type: "aiSettings"; open: boolean }
+  | { type: "syncInterval"; min: number }
+  | { type: "syncedAt"; ts: number }
+  | { type: "aiLoading"; id: string | null }
+  /** LLM 分析结果落库（覆盖旧值，重新分析也走这里） */
+  | { type: "applyAi"; id: string; category: SmartCategory | null; summary: string; why?: string }
   /** 移除某个账户及其全部邮件 */
   | { type: "removeAccountEmails"; accountId: string }
   /** 合并从服务器拉回的真实邮件（按 id 去重，新邮件插在前面） */
-  | { type: "mergeReal"; emails: Email[] };
+  | { type: "mergeReal"; emails: Email[] }
+  /** 服务端对账：剔除在服务器上已被删除/归档的本地陈旧副本 */
+  | { type: "pruneReal"; entries: { accountId: string; folder: Email["folder"]; uids: Set<number> }[] };
 
 const LS_THEME = "vela:theme";
 const LS_PATCHES = "vela:patches-v1";
 const LS_USER = "vela:user-emails-v1";
 const LS_DENSITY = "vela:density";
-const LS_TOKEN = "vela:token";
 const LS_GUEST = "vela:guest";
+const LS_SYNC_INTERVAL = "vela:sync-interval-min";
 
 interface Patch {
   read?: boolean;
@@ -172,7 +192,23 @@ function initialState(): State {
     realMailboxes: [],
     syncing: false,
     addMailboxOpen: false,
+    aiSettingsOpen: false,
+    aiLoadingId: null,
+    syncIntervalMin: initialSyncInterval(),
+    lastSyncAt: null,
   };
+}
+
+/** 后台检查新邮件的间隔（分钟），0 = 仅手动同步；默认 1 分钟 */
+function initialSyncInterval(): number {
+  try {
+    const raw = localStorage.getItem(LS_SYNC_INTERVAL);
+    const n = raw === null ? NaN : Number(raw);
+    if (Number.isInteger(n) && n >= 0 && n <= 1440) return n;
+  } catch {
+    /* ignore */
+  }
+  return 1;
 }
 
 function toggleIn(arr: string[], id: string): string[] {
@@ -181,8 +217,14 @@ function toggleIn(arr: string[], id: string): string[] {
 
 /** 服务端结构 -> 前端 Email（folder/category 枚举收紧，null 归一为 undefined） */
 function fromServer(e: ServerEmail): Email {
+  // 数据库 TEXT 字段拒收 \0 字节：混进来的邮件一旦带 NUL 会让整批同步 500，
+  // 在进入本地状态的唯一入口统一清洗掉
+  const clean = (s: string) => s.replaceAll("\u0000", "");
   return {
     ...e,
+    subject: clean(e.subject ?? ""),
+    body: clean(e.body ?? ""),
+    htmlBody: e.htmlBody ? clean(e.htmlBody) : undefined,
     folder: e.folder as Email["folder"],
     category: e.category as SmartCategory | null,
     cc: e.cc ?? undefined,
@@ -365,6 +407,28 @@ function reducer(state: State, action: Action): State {
       return { ...state, syncing: action.on };
     case "addMailbox":
       return { ...state, addMailboxOpen: action.open };
+    case "aiSettings":
+      return { ...state, aiSettingsOpen: action.open };
+    case "syncInterval":
+      return { ...state, syncIntervalMin: action.min };
+    case "syncedAt":
+      return { ...state, lastSyncAt: action.ts };
+    case "aiLoading":
+      return { ...state, aiLoadingId: action.id };
+    case "applyAi":
+      return {
+        ...state,
+        emails: state.emails.map((e) =>
+          e.id === action.id
+            ? {
+                ...e,
+                category: action.category ?? e.category,
+                aiSummary: action.summary || e.aiSummary,
+                aiWhy: action.why,
+              }
+            : e,
+        ),
+      };
     case "removeAccountEmails":
       return {
         ...state,
@@ -383,6 +447,20 @@ function reducer(state: State, action: Action): State {
       const fresh = action.emails.filter((e) => !known.has(e.id));
       if (!fresh.length) return state;
       return { ...state, emails: [...fresh, ...state.emails] };
+    }
+    case "pruneReal": {
+      // 只动真实邮件（有 uid 的）；本地副本在服务器上已不存在（网页端删了/归档了）就移除
+      let changed = false;
+      const emails = state.emails.filter((e) => {
+        if (!e.real || typeof e.uid !== "number") return true;
+        const entry = action.entries.find((p) => p.accountId === e.accountId && p.folder === e.folder);
+        if (!entry) return true;
+        if (entry.uids.has(e.uid)) return true;
+        changed = true;
+        return false;
+      });
+      if (!changed) return state;
+      return { ...state, emails };
     }
     default:
       return state;
@@ -414,9 +492,6 @@ function parseContacts(raw: string): { name: string; email: string }[] {
     });
 }
 
-function freshMockCopy(): Email[] {
-  return MOCK_EMAILS.map((e) => ({ ...e }));
-}
 
 export interface MailContextValue {
   state: State;
@@ -427,9 +502,6 @@ export interface MailContextValue {
   unreadByAccount: Record<string, number>;
   unreadAll: number;
   actions: {
-    login: (username: string, password: string) => Promise<void>;
-    register: (username: string, password: string) => Promise<void>;
-    logout: () => Promise<void>;
     enterGuest: () => void;
     select: (id: string | null) => void;
     toggleStar: (id: string) => void;
@@ -464,16 +536,21 @@ export interface MailContextValue {
     updateCompose: (patch: Partial<ComposeDraft>) => void;
     sendCompose: () => void;
     analyze: (id: string) => void;
+    /** 批量分析所有未分析邮件（不限 3 天），完成后提示 */
+    analyzeAll: () => void;
     toast: (text: string, tone?: Toast["tone"]) => void;
     dismissToast: (id: number) => void;
     /* ———— 真实邮箱 ———— */
     /** 载入已接入的真实邮箱账户列表 */
     loadRealMailboxes: () => Promise<void>;
-    /** 同步全部真实邮箱（拉取新邮件） */
-    syncRealMail: (silent?: boolean) => Promise<void>;
+    /** 同步全部真实邮箱（拉取新邮件）；auto=true 为后台静默模式 */
+    syncRealMail: (silent?: boolean, auto?: boolean) => Promise<void>;
     /** 打开 / 关闭「接入真实邮箱」向导 */
     openAddMailbox: () => void;
     closeAddMailbox: () => void;
+    /** 打开 / 关闭「AI 设置」面板 */
+    openAiSettings: () => void;
+    closeAiSettings: () => void;
     /** 移除一个真实邮箱账户 */
     removeRealMailbox: (accountId: string) => Promise<void>;
   };
@@ -484,38 +561,37 @@ const MailContext = createContext<MailContextValue | null>(null);
 export function MailProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
 
-  /** 以服务端邮箱进入用户会话；服务端为空（新账户）时用演示数据播种，交由同步 effect 上传 */
-  const enterUserSession = async (token: string, username: string) => {
-    const { emails } = await api.getEmails(token);
-    const list = emails.length ? emails.map(fromServer) : freshMockCopy();
-    dispatch({ type: "setAuth", auth: { mode: "user", username, token }, emails: list });
+  /** 从本地 SQLite 恢复会话（桌面 / 手机） */
+  const loadLocalSession = async () => {
+    const emails = await getEmails();
+    // 过滤历史版本播种过、已落库的演示邮件（mock id 均为 m001…）
+    const list = emails.map(fromServer).filter((e) => !MOCK_BY_ID.has(e.id));
+    dispatch({ type: "setAuth", auth: { mode: "user", username: "本地", token: "" }, emails: list });
   };
 
   /** 载入真实邮箱账户列表（仅桌面版可用，失败不阻断其它功能） */
   const loadRealMailboxes = async () => {
     if (!realMailSupported() || state.auth?.mode !== "user") return;
     try {
-      const list = await realMail.listAccounts(state.auth.token);
+      const list = await realMail.listAccounts();
       dispatch({ type: "realMailboxes", mailboxes: list });
     } catch {
       /* 数据库未就绪等情况：静默失败，不影响演示功能 */
     }
   };
 
-  // 启动：校验本地会话令牌；无令牌但有游客标记则恢复游客会话
+  // 启动：桌面/手机直接进入本地会话；浏览器（无本地库）进游客演示
   useEffect(() => {
     (async () => {
-      const token = localStorage.getItem(LS_TOKEN);
-      if (token) {
+      if (isDesktop()) {
         try {
-          const me = await api.getMe(token);
-          await enterUserSession(token, me.username);
+          await loadLocalSession();
           return;
-        } catch {
-          localStorage.removeItem(LS_TOKEN);
+        } catch (e) {
+          console.warn("[vela] 本地库读取失败，退回游客演示：", e);
         }
       }
-      if (localStorage.getItem(LS_GUEST) === "1") {
+      if (!isDesktop() || localStorage.getItem(LS_GUEST) === "1") {
         dispatch({ type: "setAuth", auth: { mode: "guest" }, emails: hydrateLocalEmails() });
         return;
       }
@@ -530,7 +606,7 @@ export function MailProvider({ children }: { children: ReactNode }) {
       void loadRealMailboxes();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.booted, state.auth?.mode, state.auth?.mode === "user" ? state.auth.token : ""]);
+  }, [state.booted, state.auth?.mode]);
 
   // 持久化：主题与密度始终本地
   useEffect(() => {
@@ -541,6 +617,15 @@ export function MailProvider({ children }: { children: ReactNode }) {
       /* ignore */
     }
   }, [state.theme, state.density]);
+
+  // 持久化：邮件检查频率
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_SYNC_INTERVAL, String(state.syncIntervalMin));
+    } catch {
+      /* ignore */
+    }
+  }, [state.syncIntervalMin]);
 
   // 持久化：游客模式写 localStorage（登出状态不得写入，否则会清空游客数据）
   useEffect(() => {
@@ -567,15 +652,14 @@ export function MailProvider({ children }: { children: ReactNode }) {
     }
   }, [state.emails, state.auth, state.booted]);
 
-  // 持久化：用户模式防抖同步到 PostgreSQL
+  // 持久化：防抖保存到本地 SQLite
   useEffect(() => {
     if (!state.booted || state.auth?.mode !== "user") return;
-    const token = state.auth.token;
     const t = window.setTimeout(() => {
-      api.syncEmails(token, state.emails).catch((err: Error) => {
+      syncEmails(state.emails).catch((err) => {
         dispatch({
           type: "toastPush",
-          toast: { id: Date.now(), text: `同步失败：${err.message}`, tone: "warn" },
+          toast: { id: Date.now(), text: `本地保存失败：${errText(err)}`, tone: "warn" },
         });
       });
     }, 800);
@@ -648,31 +732,6 @@ export function MailProvider({ children }: { children: ReactNode }) {
       `\n\n——— 原始邮件 ———\n发件人：${e.from.name} <${e.from.email}>\n时间：${e.date}\n主题：${e.subject}\n\n${e.body}`;
 
     return {
-      login: async (username, password) => {
-        const r = await api.login(username, password);
-        localStorage.setItem(LS_TOKEN, r.token);
-        localStorage.removeItem(LS_GUEST);
-        await enterUserSession(r.token, r.username);
-      },
-      register: async (username, password) => {
-        const r = await api.register(username, password);
-        localStorage.setItem(LS_TOKEN, r.token);
-        localStorage.removeItem(LS_GUEST);
-        await enterUserSession(r.token, r.username);
-      },
-      logout: async () => {
-        const token = state.auth?.mode === "user" ? state.auth.token : null;
-        localStorage.removeItem(LS_TOKEN);
-        localStorage.removeItem(LS_GUEST);
-        if (token) {
-          try {
-            await api.logout(token);
-          } catch {
-            /* 服务端会话即使未清理也会随用户改密/登出失效 */
-          }
-        }
-        dispatch({ type: "setAuth", auth: null, emails: [] });
-      },
       enterGuest: () => {
         localStorage.setItem(LS_GUEST, "1");
         dispatch({ type: "setAuth", auth: { mode: "guest" }, emails: hydrateLocalEmails() });
@@ -683,8 +742,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         const target = state.emails.find((e) => e.id === id);
         if (target?.real && !target.read && state.auth?.mode === "user") {
           void realMail
-            .setFlags(target, { read: true }, state.auth.token)
-            .catch((err: Error) => notify(`已读状态未能同步到服务器：${err.message}`, "warn"));
+            .setFlags(target, { read: true })
+            .catch((err) => notify(`已读状态未能同步到服务器：${errText(err)}`, "warn"));
         }
       },
       toggleStar: (id) => {
@@ -692,8 +751,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "star", id });
         if (target?.real && state.auth?.mode === "user") {
           void realMail
-            .setFlags(target, { starred: !target.starred }, state.auth.token)
-            .catch((err: Error) => notify(`星标未能同步到服务器：${err.message}`, "warn"));
+            .setFlags(target, { starred: !target.starred })
+            .catch((err) => notify(`星标未能同步到服务器：${errText(err)}`, "warn"));
         }
       },
       markRead: (id, read) => {
@@ -701,8 +760,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "read", id, read });
         if (target?.real && state.auth?.mode === "user") {
           void realMail
-            .setFlags(target, { read }, state.auth.token)
-            .catch((err: Error) => notify(`已读状态未能同步到服务器：${err.message}`, "warn"));
+            .setFlags(target, { read })
+            .catch((err) => notify(`已读状态未能同步到服务器：${errText(err)}`, "warn"));
         }
       },
       archive: (id) => {
@@ -710,8 +769,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         moveTo([id], "archive", "已归档");
         if (target?.real && state.auth?.mode === "user") {
           void realMail
-            .archive(target, state.auth.token)
-            .catch((err: Error) => notify(`服务器归档失败：${err.message}`, "warn"));
+            .archive(target)
+            .catch((err) => notify(`服务器归档失败：${errText(err)}`, "warn"));
         }
       },
       trash: (id) => {
@@ -719,8 +778,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         moveTo([id], "trash", "已移入垃圾箱");
         if (target?.real && state.auth?.mode === "user") {
           void realMail
-            .trash(target, state.auth.token)
-            .catch((err: Error) => notify(`服务器删除失败：${err.message}`, "warn"));
+            .trash(target)
+            .catch((err) => notify(`服务器删除失败：${errText(err)}`, "warn"));
         }
       },
       restore: (id) =>
@@ -729,6 +788,8 @@ export function MailProvider({ children }: { children: ReactNode }) {
         const removed = state.emails.filter((e) => e.folder === "trash");
         if (!removed.length) return;
         dispatch({ type: "emptyTrash" });
+        // 本地库同步删除（撤销只是界面恢复，重新保存会补回）
+        void deleteEmails(removed.map((e) => e.id));
         notify(`垃圾箱已清空（${removed.length} 封）`, "success", undefined, removed);
       },
       setView: (v) => dispatch({ type: "view", ...v }),
@@ -745,11 +806,10 @@ export function MailProvider({ children }: { children: ReactNode }) {
         notify(read ? `已标为已读（${ids.length} 封）` : `已标为未读（${ids.length} 封）`, "default");
         // 真实邮件逐封回写（IMAP 没有批量跨文件夹接口，逐封最稳妥）
         if (state.auth?.mode === "user") {
-          const token = state.auth.token;
           for (const id of ids) {
             const e = state.emails.find((x) => x.id === id);
             if (e?.real) {
-              void realMail.setFlags(e, { read }, token).catch(() => {
+              void realMail.setFlags(e, { read }).catch(() => {
                 /* 单封失败不打断整批 */
               });
             }
@@ -760,11 +820,10 @@ export function MailProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "starMany", ids, starred });
         notify(starred ? `已加星标（${ids.length} 封）` : `已去星标（${ids.length} 封）`, "default");
         if (state.auth?.mode === "user") {
-          const token = state.auth.token;
           for (const id of ids) {
             const e = state.emails.find((x) => x.id === id);
             if (e?.real) {
-              void realMail.setFlags(e, { starred }, token).catch(() => {
+              void realMail.setFlags(e, { starred }).catch(() => {
                 /* 单封失败不打断整批 */
               });
             }
@@ -774,28 +833,27 @@ export function MailProvider({ children }: { children: ReactNode }) {
       batchArchive: (ids) => {
         moveTo(ids, "archive", "已归档");
         if (state.auth?.mode === "user") {
-          const token = state.auth.token;
           for (const id of ids) {
             const e = state.emails.find((x) => x.id === id);
-            if (e?.real) void realMail.archive(e, token).catch(() => {});
+            if (e?.real) void realMail.archive(e).catch(() => {});
           }
         }
       },
       batchTrash: (ids) => {
         moveTo(ids, "trash", "已移入垃圾箱");
         if (state.auth?.mode === "user") {
-          const token = state.auth.token;
           for (const id of ids) {
             const e = state.emails.find((x) => x.id === id);
-            if (e?.real) void realMail.trash(e, token).catch(() => {});
+            if (e?.real) void realMail.trash(e).catch(() => {});
           }
         }
       },
       openPalette: () => dispatch({ type: "palette", open: true }),
       closePalette: () => dispatch({ type: "palette", open: false }),
       newCompose: (accountId) => {
-        const acct =
-          accountId ?? (state.accountId === "all" ? ACCOUNTS[0].id : state.accountId);
+        // 未指定账户时优先用第一个真实邮箱，没有真实邮箱才退回演示账户
+        const fallback = state.realMailboxes[0]?.id ?? ACCOUNTS[0].id;
+        const acct = accountId ?? (state.accountId === "all" ? fallback : state.accountId);
         dispatch({
           type: "compose",
           draft: {
@@ -850,12 +908,15 @@ export function MailProvider({ children }: { children: ReactNode }) {
         if (!draft) return;
         const dirty = draft.to.trim() || draft.subject.trim() || draft.body.trim();
         if (save && dirty) {
-          const account = ACCOUNTS.find((a) => a.id === draft.accountId) ?? ACCOUNTS[0];
+          const realBox = state.realMailboxes.find((m) => m.id === draft.accountId);
+          const demo = ACCOUNTS.find((a) => a.id === draft.accountId) ?? ACCOUNTS[0];
+          const fromName = realBox?.label || realBox?.email || demo.name;
+          const fromEmail = realBox?.email ?? demo.email;
           const email: Email = {
             id: state.composeDraftId ?? `draft-${Date.now()}`,
             accountId: draft.accountId,
             folder: "drafts",
-            from: { name: account.name, email: account.email },
+            from: { name: fromName, email: fromEmail },
             to: parseContacts(draft.to),
             cc: draft.cc ? parseContacts(draft.cc) : undefined,
             subject: draft.subject || "（无主题）",
@@ -885,7 +946,6 @@ export function MailProvider({ children }: { children: ReactNode }) {
         // 真实邮箱账户：走 SMTP 真实投递
         const realBox = state.realMailboxes.some((m) => m.id === draft.accountId);
         if (realBox && state.auth?.mode === "user") {
-          const token = state.auth.token;
           const draftId = state.composeDraftId;
           const quoted = state.emails.find((e) => e.id === state.selectedId);
           const subject = draft.subject || "（无主题）";
@@ -907,7 +967,6 @@ export function MailProvider({ children }: { children: ReactNode }) {
                 subject,
                 body,
               },
-              token,
             )
             .then(() => {
               // 本地先显示在已发送，服务器端稍后同步会拉到权威副本
@@ -934,11 +993,11 @@ export function MailProvider({ children }: { children: ReactNode }) {
               };
               dispatch({ type: "sent", email: sent, draftId });
             })
-            .catch((err: Error) => {
+            .catch((err) => {
               // 发送失败时保留写信窗口与草稿，用户可重试或修改后重发
               dispatch({
                 type: "toastPush",
-                toast: { id: Date.now(), text: `发送失败：${err.message}`, tone: "warn", ttl: 6000 },
+                toast: { id: Date.now(), text: `发送失败：${errText(err)}`, tone: "warn", ttl: 6000 },
               });
             });
           return;
@@ -971,20 +1030,75 @@ export function MailProvider({ children }: { children: ReactNode }) {
       },
       analyze: (id) => {
         const target = state.emails.find((e) => e.id === id);
-        if (!target || target.category) return;
+        if (!target || state.aiLoadingId) return;
+
+        // 已配置真实 LLM：优先走 API（结果覆盖旧分析，支持重新分析）
+        const settings = loadAiSettings();
+        if (aiConfigured(settings)) {
+          dispatch({ type: "aiLoading", id });
+          notify("AI 正在分析…", "default");
+          void analyzeWithAi(target, settings)
+            .then((r) => {
+              dispatch({ type: "applyAi", id, ...r });
+              notify(
+                r.category ? "AI 分析完成" : "AI 已返回内容，但未能解析出分类",
+                r.category ? "success" : "default",
+              );
+            })
+            .catch((err) => notify(`AI 分析失败：${errText(err)}`, "warn"))
+            .finally(() => dispatch({ type: "aiLoading", id: null }));
+          return;
+        }
+
+        // 未配置 AI：本地规则兜底（离线可用）
+        if (target.category) return;
         dispatch({ type: "analyze", id });
         if (classifyRules(target)) {
-          notify("本地规则分析完成", "success");
+          notify("本地规则分析完成（可在侧边栏配置真实 AI）", "success");
         } else {
-          notify("规则未命中，保持未分类", "warn");
+          notify("规则未命中，保持未分类；配置真实 AI 后效果更好", "warn");
         }
+      },
+      analyzeAll: () => {
+        const settings = loadAiSettings();
+        if (!aiConfigured(settings)) {
+          notify("请先在 AI 设置里配置服务商与 API Key", "warn");
+          actions.openAiSettings();
+          return;
+        }
+        if (aiBatchBusyRef.current) {
+          notify("已有一批邮件正在分析中", "default");
+          return;
+        }
+        // 全部未分析的收件箱真实邮件（不限时间），按时间新→旧
+        const candidates = state.emails
+          .filter((e) => e.folder === "inbox" && !e.aiSummary && !e.category && !aiAttemptedRef.current.has(e.id))
+          .sort((a, b) => +new Date(b.date) - +new Date(a.date));
+        if (!candidates.length) {
+          notify("没有待分析的邮件", "default");
+          return;
+        }
+        notify(`开始批量分析 ${candidates.length} 封邮件…`, "default");
+        void analyzeBatch(candidates, settings, (done, total) => {
+          if (done % 20 === 0 || done === total) {
+            notify(`批量分析进度 ${done}/${total}`, "default");
+          }
+        }).then((r) => {
+          if (!r) return;
+          if (r.done) {
+            notify(`批量分析完成：成功 ${r.done} 封${r.failed ? `，失败 ${r.failed} 封` : ""}`, r.failed ? "default" : "success");
+          } else {
+            notify(`批量分析失败（${r.failed} 封），请检查 AI 设置或网络`, "warn");
+          }
+        });
       },
       toast: (text, tone = "default") =>
         dispatch({ type: "toastPush", toast: { id: Date.now(), text, tone } }),
       dismissToast: (id) => dispatch({ type: "toastPop", id }),
       /* ———— 真实邮箱 ———— */
       loadRealMailboxes,
-      syncRealMail: async (silent = false) => {
+      /** auto = 后台定时同步：完全静默（不弹提示、不转同步图标） */
+      syncRealMail: async (silent = false, auto = false) => {
         if (!realMailSupported()) {
           if (!silent) actions.toast("真实邮箱需要在桌面应用中使用", "warn");
           return;
@@ -997,14 +1111,40 @@ export function MailProvider({ children }: { children: ReactNode }) {
           if (!silent) actions.toast("尚未接入任何真实邮箱", "warn");
           return;
         }
+        // 手动同步进行中就不叠加一次自动同步
+        if (auto && state.syncing) return;
 
-        dispatch({ type: "syncing", on: true });
+        if (!auto) dispatch({ type: "syncing", on: true });
         try {
-          const { emails: incoming, failures, hasMoreHistory } = await realMail.syncAll(
-            state.auth.token,
-          );
-          dispatch({ type: "mergeReal", emails: incoming });
+          const { emails: incoming, failures, hasMoreHistory, present } = await realMail.syncAll();
 
+          // 先算真正的新邮件（id 尚未在本地），提示才不会虚报
+          const knownIds = new Set(state.emails.map((e) => e.id));
+          const fresh = incoming.filter((e) => !knownIds.has(e.id));
+
+          dispatch({ type: "mergeReal", emails: incoming });
+          dispatch({ type: "syncedAt", ts: Date.now() });
+          // 服务端对账：只对同步成功的账户做（failures 里的账户结果不可信）
+          const okAccounts = new Set(
+            state.realMailboxes.map((m) => m.id).filter((id) => !failures.some((f) => f.accountId === id)),
+          );
+          const pruneEntries = present
+            .filter((p) => okAccounts.has(p.accountId))
+            .map((p) => ({ accountId: p.accountId, folder: p.folder as Email["folder"], uids: new Set(p.uids) }));
+          dispatch({ type: "pruneReal", entries: pruneEntries });
+          // 本地库同步删除在服务器上已不存在的邮件
+          const gone = state.emails.filter((e) => {
+            if (!e.real || typeof e.uid !== "number") return false;
+            const entry = pruneEntries.find((p) => p.accountId === e.accountId && p.folder === e.folder);
+            return entry ? !entry.uids.has(e.uid) : false;
+          });
+          void deleteEmails(gone.map((e) => e.id));
+
+          if (auto) {
+            // 后台同步静默完成；有新邮件时轻提示一声
+            if (fresh.length) actions.toast(`已收取 ${fresh.length} 封新邮件`, "success");
+            return;
+          }
           // 有账户同步失败时必须告知用户，否则会误以为“没有新邮件”
           if (failures.length) {
             const detail = failures
@@ -1030,28 +1170,35 @@ export function MailProvider({ children }: { children: ReactNode }) {
             );
           }
         } catch (e) {
-          dispatch({
-            type: "toastPush",
-            toast: {
-              id: Date.now(),
-              text: `同步失败：${e instanceof Error ? e.message : "未知错误"}`,
-              tone: "warn",
-              ttl: 6000,
-            },
-          });
+          if (!auto) {
+            dispatch({
+              type: "toastPush",
+              toast: {
+                id: Date.now(),
+                text: `同步失败：${errText(e)}`,
+                tone: "warn",
+                ttl: 6000,
+              },
+            });
+          } else {
+            console.warn("[vela] 后台自动同步失败：", e);
+          }
         } finally {
-          dispatch({ type: "syncing", on: false });
+          if (!auto) dispatch({ type: "syncing", on: false });
         }
       },
       openAddMailbox: () => dispatch({ type: "addMailbox", open: true }),
       closeAddMailbox: () => dispatch({ type: "addMailbox", open: false }),
+      openAiSettings: () => dispatch({ type: "aiSettings", open: true }),
+      closeAiSettings: () => dispatch({ type: "aiSettings", open: false }),
       removeRealMailbox: async (accountId) => {
         if (state.auth?.mode !== "user") return;
         try {
-          await realMail.removeAccount(accountId, state.auth.token);
+          await realMail.removeAccount(accountId);
           await loadRealMailboxes();
-          // 一并清掉本地该账户的邮件，避免留下无法操作的孤儿数据
+          // 一并清掉本地该账户的邮件（含库内记录），避免留下无法操作的孤儿数据
           dispatch({ type: "removeAccountEmails", accountId });
+          void deleteEmails(state.emails.filter((e) => e.accountId === accountId).map((e) => e.id));
           actions.toast(`已移除 ${accountId}`, "default");
         } catch (e) {
           actions.toast(
@@ -1063,7 +1210,107 @@ export function MailProvider({ children }: { children: ReactNode }) {
     };
   }, [state]);
 
-  /** 演示账户 + 真实邮箱账户合并后的完整账户列表 */
+  /* ———— 后台自动同步：新邮件不用等手动点同步 ———— */
+  const autoSyncRef = useRef(actions.syncRealMail);
+  useEffect(() => {
+    autoSyncRef.current = actions.syncRealMail;
+  });
+  const hasMailboxes = state.realMailboxes.length > 0;
+  useEffect(() => {
+    if (!state.booted || state.auth?.mode !== "user" || !realMailSupported() || !hasMailboxes) {
+      return;
+    }
+    // 0 = 仅手动同步：不自动检查
+    if (state.syncIntervalMin === 0) return;
+    // 进入会话立即同步一次，之后按设置的间隔后台静默检查
+    void autoSyncRef.current(true, true);
+    const ms = Math.max(15_000, state.syncIntervalMin * 60_000);
+    const iv = window.setInterval(() => void autoSyncRef.current(true, true), ms);
+    return () => window.clearInterval(iv);
+  }, [state.booted, state.auth?.mode, hasMailboxes, state.syncIntervalMin]);
+
+  /* ———— AI 批量/自动分析共用：同一时间只跑一批，逐封带间隔 ———— */
+  const aiBatchBusyRef = useRef(false);
+  /** 本会话内已尝试过自动分析的邮件 id（失败也不重试，避免坏 Key 造成请求风暴） */
+  const aiAttemptedRef = useRef<Set<string>>(new Set());
+  /** 上次自动分析扫描完成的时间（用于按设置节流） */
+  const lastAutoScanRef = useRef(0);
+
+  /** 批量分析一批邮件。返回 {done, failed}；有其它批次在跑时返回 null */
+  const analyzeBatch = async (
+    candidates: Email[],
+    settings: AiSettingsType,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<{ done: number; failed: number } | null> => {
+    if (aiBatchBusyRef.current || !candidates.length) return null;
+    aiBatchBusyRef.current = true;
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const email of candidates) {
+        aiAttemptedRef.current.add(email.id);
+        // 逐封点亮加载态：列表/阅读页据此显示转圈并禁用重复触发
+        dispatch({ type: "aiLoading", id: email.id });
+        try {
+          const r = await analyzeWithAi(email, settings);
+          dispatch({ type: "applyAi", id: email.id, ...r });
+          done += 1;
+        } catch {
+          failed += 1;
+          // 连续失败说明 Key/网络有问题，直接中止整批，避免逐封都超时一遍
+          if (failed >= 3 && done === 0) break;
+        }
+        dispatch({ type: "aiLoading", id: null });
+        onProgress?.(done + failed, candidates.length);
+        await new Promise((res) => window.setTimeout(res, 200));
+      }
+    } finally {
+      aiBatchBusyRef.current = false;
+      dispatch({ type: "aiLoading", id: null });
+    }
+    return { done, failed };
+  };
+
+  /* ———— 自动分析：按设置的频率扫描最近 3 天未分析的新邮件 ———— */
+  useEffect(() => {
+    if (!state.booted || state.auth?.mode !== "user" || aiBatchBusyRef.current) return;
+    const settings = loadAiSettings();
+    if (!settings.autoAnalyze || !aiConfigured(settings)) return;
+
+    // 频率节流：intervalMin=0 表示每次依赖变化都扫描（紧跟新邮件）；
+    // 否则距上次扫描不足间隔就跳过
+    const intervalMs = settings.autoAnalyzeIntervalMin * 60_000;
+    if (intervalMs > 0 && Date.now() - lastAutoScanRef.current < intervalMs) return;
+
+    const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    const candidates = state.emails
+      .filter(
+        (e) =>
+          e.folder === "inbox" &&
+          !e.aiSummary &&
+          !e.category &&
+          !aiAttemptedRef.current.has(e.id) &&
+          new Date(e.date).getTime() >= threeDaysAgo,
+      )
+      .slice(0, 20);
+    if (!candidates.length) return;
+
+    lastAutoScanRef.current = Date.now();
+    void analyzeBatch(candidates, settings).then((r) => {
+      if (!r) return;
+      if (r.done) {
+        actions.toast(
+          `AI 已自动分析 ${r.done} 封最近邮件${r.failed ? `，${r.failed} 封失败` : ""}`,
+          "default",
+        );
+      } else if (r.failed) {
+        actions.toast(`AI 自动分析失败 ${r.failed} 封，请检查 AI 设置或稍后重试`, "warn");
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.emails, state.booted, state.auth?.mode]);
+
+  /** 真实邮箱账户（+ 游客模式下的演示账户）合并后的完整账户列表 */
   const accounts = useMemo<Account[]>(() => {
     const real: Account[] = state.realMailboxes.map((m) => ({
       id: m.id,
@@ -1075,8 +1322,10 @@ export function MailProvider({ children }: { children: ReactNode }) {
       color: avatarColor(m.email),
       real: true,
     }));
+    // 登录会话只显示真实邮箱；演示账户仅游客模式可见
+    if (state.auth?.mode === "user") return real;
     return [...real, ...ACCOUNTS];
-  }, [state.realMailboxes]);
+  }, [state.realMailboxes, state.auth?.mode]);
 
   const value = useMemo<MailContextValue>(
     () => ({

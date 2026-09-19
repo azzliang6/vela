@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, X } from "lucide-react";
 import { useMail } from "../store/MailContext";
 import { realMail, realMailSupported } from "../services/realMailService";
+import { errText } from "../services/errText";
 import type { ProviderPreset } from "../types";
 
 /**
@@ -11,8 +12,7 @@ import type { ProviderPreset } from "../types";
  * 保存前一定会先测试连通性，避免把错误的授权码写进数据库。
  */
 export function AddMailboxDialog() {
-  const { actions, state } = useMail();
-  const token = state.auth?.mode === "user" ? state.auth.token : "";
+  const { actions } = useMail();
 
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [provider, setProvider] = useState("qq");
@@ -40,15 +40,19 @@ export function AddMailboxDialog() {
       .catch((e: Error) => setError(e.message));
   }, []);
 
-  // 输入邮箱时自动匹配服务商（用户手动改过就不再覆盖）
+  // 输入邮箱时自动匹配服务商（用户手动改过就不再覆盖）。
+  // 域名还没输到「xxx.」之前不猜（否则输入 @ 的瞬间会被切到 custom，
+  // 看起来就像服务商被清空）；也从不自动跳到 custom。
   const onEmailChange = async (v: string) => {
     setEmail(v);
     setError("");
     setOk("");
     if (!v.includes("@") || isCustom) return;
+    const domain = v.slice(v.lastIndexOf("@") + 1);
+    if (!domain.includes(".")) return;
     try {
       const guess = await realMail.guessProvider(v.trim());
-      if (guess && guess !== provider) setProvider(guess);
+      if (guess && guess !== "custom" && guess !== provider) setProvider(guess);
     } catch {
       /* 匹配失败不打扰用户 */
     }
@@ -71,7 +75,7 @@ export function AddMailboxDialog() {
       const folders = await realMail.testConnection(input());
       setOk(`连接成功，共发现 ${folders.length} 个文件夹`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "测试失败");
+      setError(errText(e));
     } finally {
       setBusy(null);
     }
@@ -82,12 +86,12 @@ export function AddMailboxDialog() {
     setError("");
     setOk("");
     try {
-      const acc = await realMail.addAccount(input(), token);
+      const acc = await realMail.addAccount(input());
       actions.toast(`已接入 ${acc.email}`, "success");
       await actions.loadRealMailboxes();
       actions.closeAddMailbox();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "保存失败");
+      setError(errText(e));
     } finally {
       setBusy(null);
     }

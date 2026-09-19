@@ -1,19 +1,17 @@
 //! 暴露给前端的真实邮箱操作（Tauri commands）。
 //!
-//! 前端的 `api.ts` 封装了两种后端：
-//! - 浏览器环境：调用 `http://127.0.0.1:3210/api/mail/*`（Node 版 server/index.mjs）
-//! - 桌面环境：通过 `invoke("...")` 调用本模块
-//!
-//! 因为 IMAP/SMTP 是同步阻塞 IO，这里用 `spawn_blocking` 把网络操作挪到阻塞线程池，
-//! 避免卡住 Tauri 的异步运行时（否则界面会假死）。
+//! 应用为纯本地单用户形态：没有账号体系，命令直接读写本地 SQLite
+//! （`crate::localdb::Db`，managed state）。IMAP/SMTP 是同步阻塞 IO，
+//! 用 `spawn_blocking` 把网络操作挪到阻塞线程池，避免卡住界面。
 
 use serde::Deserialize;
 
 use super::imap;
+use super::types::ServerFolder;
 use super::providers::{self, apply_preset, FolderKind, MailServerConfig, ProviderPreset};
 use super::store;
 use super::smtp::{self, OutgoingMail};
-use crate::server;
+use crate::localdb::Db;
 
 /// 统一的命令错误类型：前端拿到的是字符串消息
 type CmdResult<T> = Result<T, String>;
@@ -80,6 +78,10 @@ fn crypto(app: &tauri::AppHandle) -> CmdResult<super::Crypto> {
     Err("无法确定密钥存储位置，请设置 VELA_SECRET 环境变量".into())
 }
 
+fn lock_db(db: &Db) -> CmdResult<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+    db.0.lock().map_err(|_| "数据库忙".into())
+}
+
 /* ———————————————— 命令 ———————————————— */
 
 /// 服务商预设列表（含 IMAP/SMTP 地址与申请授权码的提示）
@@ -107,7 +109,7 @@ pub async fn mail_test_connection(input: AddAccountInput) -> CmdResult<Vec<Strin
 #[tauri::command]
 pub async fn mail_add_account(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     input: AddAccountInput,
 ) -> CmdResult<super::types::MailboxAccount> {
     let label = if input.label.trim().is_empty() {
@@ -117,7 +119,6 @@ pub async fn mail_add_account(
     };
     let cfg = input.into_config()?;
     let crypto = crypto(&app)?;
-    let user_id = server::user_id_from_token(&token).await?;
 
     // 先验证能登录成功，避免把错误的授权码存进数据库
     let probe = cfg.clone();
@@ -125,25 +126,25 @@ pub async fn mail_add_account(
         .await
         .map_err(|e| format!("任务执行失败：{e}"))??;
 
-    let client = server::open_client().await?;
-    let account = store::upsert_account(&client, user_id, &cfg, &label, &crypto).await?;
-    Ok(account)
+    let conn = lock_db(&db)?;
+    store::upsert_account(&conn, &cfg, &label, &crypto)
 }
 
 /// 列出已接入的真实邮箱账户
 #[tauri::command]
-pub async fn mail_list_accounts(token: String) -> CmdResult<Vec<super::types::MailboxAccount>> {
-    let user_id = server::user_id_from_token(&token).await?;
-    let client = server::open_client().await?;
-    store::list_accounts(&client, user_id).await
+pub async fn mail_list_accounts(db: tauri::State<'_, Db>) -> CmdResult<Vec<super::types::MailboxAccount>> {
+    let conn = lock_db(&db)?;
+    store::list_accounts(&conn)
 }
 
 /// 移除一个邮箱账户（其邮件由前端一并清除）
 #[tauri::command]
-pub async fn mail_remove_account(token: String, account_id: String) -> CmdResult<()> {
-    let user_id = server::user_id_from_token(&token).await?;
-    let client = server::open_client().await?;
-    store::delete_account(&client, user_id, &account_id).await
+pub async fn mail_remove_account(
+    db: tauri::State<'_, Db>,
+    account_id: String,
+) -> CmdResult<()> {
+    let conn = lock_db(&db)?;
+    store::delete_account(&conn, &account_id)
 }
 
 /// 同步结果（返回给前端）
@@ -164,32 +165,58 @@ pub struct SyncOutcome {
     /// 不会阻断其它账户的同步。前端据此能看到到底哪个账户出了问题。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 各文件夹当前在服务器上的完整 UID 列表；前端据此剔除
+    /// 「在服务器上已删除 / 归档」的本地陈旧副本
+    pub present_uids: Vec<PresentUids>,
 }
 
-/// 同步一个真实邮箱账户：拉取新邮件并写回游标
-#[tauri::command]
-pub async fn mail_sync_account(
-    app: tauri::AppHandle,
-    token: String,
-    account_id: String,
-) -> CmdResult<SyncOutcome> {
-    let user_id = server::user_id_from_token(&token).await?;
-    let crypto = crypto(&app)?;
-    let client = server::open_client().await?;
+/// 某个文件夹当前在服务器上的全部 UID
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentUids {
+    /// "inbox" / "sent"
+    pub folder: String,
+    pub uids: Vec<u32>,
+}
 
-    let cfg = store::load_config(&client, user_id, &account_id, &crypto).await?;
-    let cursors = store::load_cursors(&client, user_id, &account_id).await?;
+/// 同步单个账户的内部实现（供单个/全部同步两个命令复用）。
+///
+/// 注意：数据库锁只在读写配置与游标时短暂持有，绝不跨 IMAP 网络等待。
+async fn sync_one(app: &tauri::AppHandle, db: &Db, account_id: String) -> CmdResult<SyncOutcome> {
+    let crypto = crypto(app)?;
+    let (cfg, cursors) = {
+        let conn = lock_db(db)?;
+        (
+            store::load_config(&conn, &account_id, &crypto)?,
+            store::load_cursors(&conn, &account_id)?,
+        )
+    };
 
     // IMAP 是阻塞 IO，放到阻塞线程池执行，避免界面假死
-    let fetch_cfg = cfg.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || imap::sync_account(&fetch_cfg, &cursors))
-        .await
-        .map_err(|e| format!("任务执行失败：{e}"))??;
+    let result =
+        tauri::async_runtime::spawn_blocking(move || imap::sync_account(&cfg, &cursors))
+            .await
+            .map_err(|e| format!("任务执行失败：{e}"))??;
 
-    // 写回游标；失败不影响本次已拉到的邮件
-    if let Err(e) = store::save_cursors(&client, user_id, &account_id, &result.cursors).await {
-        eprintln!("[vela] 保存同步游标失败：{e}");
+    {
+        let conn = lock_db(db)?;
+        // 写回游标；失败不影响本次已拉到的邮件
+        if let Err(e) = store::save_cursors(&conn, &account_id, &result.cursors) {
+            eprintln!("[vela] 保存同步游标失败：{e}");
+        }
     }
+
+    let present_uids = result
+        .present
+        .iter()
+        .map(|p| PresentUids {
+            folder: match p.folder {
+                ServerFolder::Inbox => "inbox".into(),
+                ServerFolder::Sent => "sent".into(),
+            },
+            uids: p.uids.clone(),
+        })
+        .collect();
 
     Ok(SyncOutcome {
         account_id,
@@ -198,19 +225,34 @@ pub async fn mail_sync_account(
         // 任一文件夹还有历史待回填，就提示用户还能继续加载
         has_more_history: result.cursors.iter().any(|c| c.has_pending_history()),
         error: None,
+        present_uids,
     })
+}
+
+/// 同步一个真实邮箱账户：拉取新邮件并写回游标
+#[tauri::command]
+pub async fn mail_sync_account(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, Db>,
+    account_id: String,
+) -> CmdResult<SyncOutcome> {
+    sync_one(&app, &db, account_id).await
 }
 
 /// 同步所有真实邮箱账户
 #[tauri::command]
-pub async fn mail_sync_all(app: tauri::AppHandle, token: String) -> CmdResult<Vec<SyncOutcome>> {
-    let user_id = server::user_id_from_token(&token).await?;
-    let client = server::open_client().await?;
-    let accounts = store::list_accounts(&client, user_id).await?;
+pub async fn mail_sync_all(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, Db>,
+) -> CmdResult<Vec<SyncOutcome>> {
+    let accounts = {
+        let conn = lock_db(&db)?;
+        store::list_accounts(&conn)?
+    };
 
     let mut out = Vec::new();
     for acc in accounts {
-        match mail_sync_account(app.clone(), token.clone(), acc.id.clone()).await {
+        match sync_one(&app, &db, acc.id.clone()).await {
             Ok(r) => out.push(r),
             Err(e) => {
                 // 单个账户失败不影响其它账户，但要把失败原因带回前端
@@ -221,6 +263,7 @@ pub async fn mail_sync_all(app: tauri::AppHandle, token: String) -> CmdResult<Ve
                     skipped: 0,
                     has_more_history: false,
                     error: Some(e),
+                    present_uids: Vec::new(),
                 });
             }
         }
@@ -232,17 +275,18 @@ pub async fn mail_sync_all(app: tauri::AppHandle, token: String) -> CmdResult<Ve
 #[tauri::command]
 pub async fn mail_set_flags(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     account_id: String,
     remote_name: String,
     uid: u32,
     read: Option<bool>,
     starred: Option<bool>,
 ) -> CmdResult<()> {
-    let user_id = server::user_id_from_token(&token).await?;
     let crypto = crypto(&app)?;
-    let client = server::open_client().await?;
-    let cfg = store::load_config(&client, user_id, &account_id, &crypto).await?;
+    let cfg = {
+        let conn = lock_db(&db)?;
+        store::load_config(&conn, &account_id, &crypto)?
+    };
 
     tauri::async_runtime::spawn_blocking(move || {
         imap::set_flags(&cfg, &remote_name, uid, read, starred)
@@ -255,39 +299,40 @@ pub async fn mail_set_flags(
 #[tauri::command]
 pub async fn mail_archive(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     account_id: String,
     remote_name: String,
     uid: u32,
 ) -> CmdResult<()> {
-    mail_move(app, token, account_id, remote_name, uid, FolderKind::Archive).await
+    mail_move(app, db, account_id, remote_name, uid, FolderKind::Archive).await
 }
 
 /// 删除：移动到服务端的垃圾箱
 #[tauri::command]
 pub async fn mail_trash(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     account_id: String,
     remote_name: String,
     uid: u32,
 ) -> CmdResult<()> {
-    mail_move(app, token, account_id, remote_name, uid, FolderKind::Trash).await
+    mail_move(app, db, account_id, remote_name, uid, FolderKind::Trash).await
 }
 
 /// 把邮件移动到指定类型的服务端文件夹
 async fn mail_move(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     account_id: String,
     remote_name: String,
     uid: u32,
     kind: FolderKind,
 ) -> CmdResult<()> {
-    let user_id = server::user_id_from_token(&token).await?;
     let crypto = crypto(&app)?;
-    let client = server::open_client().await?;
-    let cfg = store::load_config(&client, user_id, &account_id, &crypto).await?;
+    let cfg = {
+        let conn = lock_db(&db)?;
+        store::load_config(&conn, &account_id, &crypto)?
+    };
 
     tauri::async_runtime::spawn_blocking(move || {
         // 目标文件夹按服务商差异探测；找不到时给出明确提示而不是静默失败
@@ -317,13 +362,14 @@ pub struct SendInput {
 #[tauri::command]
 pub async fn mail_send(
     app: tauri::AppHandle,
-    token: String,
+    db: tauri::State<'_, Db>,
     input: SendInput,
 ) -> CmdResult<String> {
-    let user_id = server::user_id_from_token(&token).await?;
     let crypto = crypto(&app)?;
-    let client = server::open_client().await?;
-    let cfg = store::load_config(&client, user_id, &input.account_id, &crypto).await?;
+    let cfg = {
+        let conn = lock_db(&db)?;
+        store::load_config(&conn, &input.account_id, &crypto)?
+    };
 
     let mail = OutgoingMail {
         from_name: input.account_id.clone(),
@@ -337,4 +383,35 @@ pub async fn mail_send(
     tauri::async_runtime::spawn_blocking(move || smtp::send(&cfg, &mail))
         .await
         .map_err(|e| format!("任务执行失败：{e}"))?
+}
+
+/* ———————————————— 本地邮件库命令 ———————————————— */
+
+/// 读取本地全部邮件（含 AI 分析结果），启动时恢复界面状态
+#[tauri::command]
+pub async fn db_get_emails(db: tauri::State<'_, Db>) -> CmdResult<Vec<serde_json::Value>> {
+    let conn = lock_db(&db)?;
+    crate::localdb::get_emails(&conn)
+}
+
+/// 全量 upsert 本地邮件（前端防抖保存：以界面内存状态为准）
+#[tauri::command]
+pub async fn db_sync_emails(
+    db: tauri::State<'_, Db>,
+    emails: Vec<serde_json::Value>,
+) -> CmdResult<()> {
+    let db = db.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.0.lock().map_err(|_| "数据库忙")?;
+        crate::localdb::upsert_emails(&conn, &emails)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败：{e}"))?
+}
+
+/// 删除指定邮件（对账剔除 / 清空垃圾箱 / 移除账户时）
+#[tauri::command]
+pub async fn db_delete_emails(db: tauri::State<'_, Db>, ids: Vec<String>) -> CmdResult<()> {
+    let conn = lock_db(&db)?;
+    crate::localdb::delete_emails(&conn, &ids)
 }

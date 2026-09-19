@@ -97,6 +97,8 @@ pub struct FetchedMail {
     pub cc: Vec<MailAddress>,
     /// 纯文本正文
     pub body: String,
+    /// HTML 正文（邮件自带 HTML 版本时保留，前端用沙箱 iframe 渲染以显示图片等）
+    pub html_body: Option<String>,
     /// RFC3339 时间
     pub date: String,
     pub read: bool,
@@ -153,6 +155,7 @@ impl FetchedMail {
             "cc": if self.cc.is_empty() { serde_json::Value::Null } else { serde_json::Value::Array(contacts(&self.cc)) },
             "subject": self.subject,
             "body": self.body,
+            "htmlBody": self.html_body,
             "date": self.date,
             "read": self.read,
             "starred": self.starred,
@@ -217,6 +220,7 @@ mod tests {
             }],
             cc: vec![],
             body: "正文".into(),
+            html_body: None,
             date: "2026-09-18T10:00:00+08:00".into(),
             read: false,
             starred: true,

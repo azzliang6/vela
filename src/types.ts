@@ -73,6 +73,8 @@ export interface Email {
   subject: string;
   /** 纯文本正文，段落间以空行分隔 */
   body: string;
+  /** HTML 正文（邮件自带 HTML 版本时保留；沙箱 iframe 渲染，无则退回纯文本） */
+  htmlBody?: string;
   /** ISO 时间 */
   date: string;
   read: boolean;

@@ -79,54 +79,61 @@ export const realMail = {
   },
 
   /** 添加（或更新）邮箱账户，成功后授权码加密存入数据库 */
-  async addAccount(input: AddMailboxInput, token: string): Promise<RealMailbox> {
+  async addAccount(input: AddMailboxInput): Promise<RealMailbox> {
     requireDesktop();
-    return invoke<RealMailbox>("mail_add_account", { input: toRustInput(input), token });
+    return invoke<RealMailbox>("mail_add_account", { input: toRustInput(input) });
   },
 
   /** 列出已接入的真实邮箱账户 */
-  async listAccounts(token: string): Promise<RealMailbox[]> {
+  async listAccounts(): Promise<RealMailbox[]> {
     requireDesktop();
-    return invoke<RealMailbox[]>("mail_list_accounts", { token });
+    return invoke<RealMailbox[]>("mail_list_accounts", {});
   },
 
   /** 移除账户 */
-  async removeAccount(accountId: string, token: string): Promise<void> {
+  async removeAccount(accountId: string): Promise<void> {
     requireDesktop();
-    await invoke<void>("mail_remove_account", { accountId, token });
+    await invoke<void>("mail_remove_account", { accountId });
   },
 
   /** 同步单个账户：拉取新邮件 */
-  async syncAccount(
-    accountId: string,
-    token: string,
-  ): Promise<{ emails: Email[]; hasMoreHistory: boolean }> {
+  async syncAccount(accountId: string): Promise<{ emails: Email[]; hasMoreHistory: boolean }> {
     requireDesktop();
     const r = await invoke<{ emails: Email[]; hasMoreHistory?: boolean }>("mail_sync_account", {
       accountId,
-      token,
     });
     return { emails: r.emails ?? [], hasMoreHistory: r.hasMoreHistory ?? false };
   },
 
   /** 同步全部真实账户 */
-  async syncAll(
-    token: string,
-  ): Promise<{
+  async syncAll(): Promise<{
     emails: Email[];
     hasMoreHistory: boolean;
     failures: { accountId: string; error: string }[];
+    /** 各账户各文件夹当前在服务器上的完整 UID 列表（用于剔除本地陈旧副本） */
+    present: { accountId: string; folder: string; uids: number[] }[];
   }> {
     requireDesktop();
-    const results = await invoke<
-      { accountId: string; emails: Email[]; hasMoreHistory?: boolean; error?: string }[]
-    >("mail_sync_all", { token });
+    const results = await invoke<{
+      accountId: string;
+      emails: Email[];
+      hasMoreHistory?: boolean;
+      error?: string;
+      presentUids?: { folder: string; uids: number[] }[];
+    }[]>("mail_sync_all", {});
     return {
       emails: results.flatMap((r) => r.emails ?? []),
       hasMoreHistory: results.some((r) => r.hasMoreHistory),
       failures: results
         .filter((r) => r.error)
         .map((r) => ({ accountId: r.accountId, error: r.error as string })),
+      present: results.flatMap((r) =>
+        (r.presentUids ?? []).map((p) => ({
+          accountId: r.accountId,
+          folder: p.folder,
+          uids: p.uids ?? [],
+        })),
+      ),
     };
   },
 
@@ -134,12 +141,10 @@ export const realMail = {
   async setFlags(
     email: Email,
     patch: { read?: boolean; starred?: boolean },
-    token: string,
   ): Promise<void> {
     requireDesktop();
     const { accountId, uid, remoteName } = locator(email);
     await invoke<void>("mail_set_flags", {
-      token,
       accountId,
       remoteName,
       uid,
@@ -149,23 +154,23 @@ export const realMail = {
   },
 
   /** 归档：移动到服务器归档文件夹 */
-  async archive(email: Email, token: string): Promise<void> {
+  async archive(email: Email): Promise<void> {
     requireDesktop();
     const { accountId, uid, remoteName } = locator(email);
-    await invoke<void>("mail_archive", { token, accountId, remoteName, uid });
+    await invoke<void>("mail_archive", { accountId, remoteName, uid });
   },
 
   /** 删除：移动到服务器垃圾箱 */
-  async trash(email: Email, token: string): Promise<void> {
+  async trash(email: Email): Promise<void> {
     requireDesktop();
     const { accountId, uid, remoteName } = locator(email);
-    await invoke<void>("mail_trash", { token, accountId, remoteName, uid });
+    await invoke<void>("mail_trash", { accountId, remoteName, uid });
   },
 
   /** 通过 SMTP 真实发信 */
-  async send(input: SendMailInput, token: string): Promise<string> {
+  async send(input: SendMailInput): Promise<string> {
     requireDesktop();
-    return invoke<string>("mail_send", { input, token });
+    return invoke<string>("mail_send", { input });
   },
 };
 

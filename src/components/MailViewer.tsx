@@ -1,11 +1,13 @@
 import {
   Archive,
+  ArrowLeft,
   FileArchive,
   FileCode2,
   FileImage,
   FileSpreadsheet,
   FileText,
   Forward,
+  Loader2,
   Pencil,
   Reply,
   ReplyAll,
@@ -19,6 +21,7 @@ import {
 import { useMail } from "../store/MailContext";
 import { CATEGORY_META, avatarColor, initialOf, type Attachment } from "../types";
 import { formatFull, formatSize } from "../services/mailService";
+import { aiConfigured, loadAiSettings } from "../services/aiService";
 
 const ATTACH_ICONS: Record<Attachment["kind"], LucideIcon> = {
   pdf: FileText,
@@ -30,7 +33,9 @@ const ATTACH_ICONS: Record<Attachment["kind"], LucideIcon> = {
 };
 
 export function MailViewer() {
-  const { selectedEmail: email, actions } = useMail();
+  const { state, selectedEmail: email, actions } = useMail();
+  const aiReady = aiConfigured(loadAiSettings());
+  const aiBusy = state.aiLoadingId === email?.id;
 
   if (!email) {
     return (
@@ -56,7 +61,7 @@ export function MailViewer() {
   const ccNames = email.cc?.length ? email.cc.map((c) => c.name).join("、") : "";
 
   return (
-    <section className="reader-pane">
+    <section className={`reader-pane ${email ? "has-mail" : "no-mail"}`}>
       <article className="reader-inner" key={email.id}>
         {email.folder === "trash" && (
           <div className="reader-chips">
@@ -85,6 +90,14 @@ export function MailViewer() {
 
         <div className="reader-toolbar">
           <span style={{ display: "flex", gap: 2 }}>
+            <button
+              className="icon-btn back-btn"
+              title="返回列表"
+              aria-label="返回列表"
+              onClick={() => actions.select(null)}
+            >
+              <ArrowLeft size={17} />
+            </button>
             <button className="icon-btn" title="回复 (R)" onClick={() => actions.replyTo(email)}>
               <Reply size={17} />
             </button>
@@ -167,11 +180,12 @@ export function MailViewer() {
             <button
               className="chip analyze-chip"
               style={{ ["--chip" as string]: "var(--accent)" }}
-              title="用本地规则引擎分类并生成摘要"
+              title={aiReady ? "调用大模型分类并生成摘要" : "用本地规则引擎分类并生成摘要（配置 AI 后走真实大模型）"}
+              disabled={aiBusy || state.aiLoadingId !== null}
               onClick={() => actions.analyze(email.id)}
             >
-              <Sparkles size={11} />
-              本地规则分析
+              {aiBusy ? <Loader2 size={11} className="spin" /> : <Sparkles size={11} />}
+              {aiBusy ? "AI 分析中…" : aiReady ? "AI 分析" : "本地规则分析"}
             </button>
           </div>
         )}
@@ -202,6 +216,17 @@ export function MailViewer() {
             <div className="ai-head">
               <Sparkles size={13} />
               Vela AI 摘要
+              {aiReady && email.folder !== "trash" && (
+                <button
+                  className="chip ai-reanalyze"
+                  title="用大模型重新分析这封邮件"
+                  disabled={aiBusy || state.aiLoadingId !== null}
+                  onClick={() => actions.analyze(email.id)}
+                >
+                  {aiBusy ? <Loader2 size={10} className="spin" /> : <Sparkles size={10} />}
+                  重新分析
+                </button>
+              )}
             </div>
             <div className="ai-body">{email.aiSummary}</div>
             {email.aiWhy && (
@@ -233,11 +258,28 @@ export function MailViewer() {
           </div>
         )}
 
-        <div className="mail-body">
-          {email.body.split(/\n\n+/).map((p, i) => (
-            <p key={i}>{p}</p>
-          ))}
-        </div>
+        {email.htmlBody ? (
+          <div className="mail-html-wrap">
+            {/*
+              沙箱 iframe 渲染邮件 HTML 正文：sandbox 置空串禁掉脚本/表单/跳转，
+              只保留图片与样式；srcdoc 与外部隔离，无法触碰应用本身。
+              高度固定内部滚动（沙箱域不可读，没法自适应内容高度）。
+            */}
+            <iframe
+              className="mail-html"
+              title="邮件正文"
+              sandbox=""
+              srcDoc={email.htmlBody}
+            />
+            {email.body.trim() && <div className="mail-html-tip">以上为 HTML 版正文 · 部分内嵌图片可能不显示</div>}
+          </div>
+        ) : (
+          <div className="mail-body">
+            {email.body.split(/\n\n+/).map((p, i) => (
+              <p key={i}>{p}</p>
+            ))}
+          </div>
+        )}
       </article>
     </section>
   );

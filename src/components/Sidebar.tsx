@@ -4,11 +4,11 @@ import {
   FileText,
   Inbox,
   Layers,
-  LogOut,
   Moon,
   Plus,
   RefreshCw,
   Sailboat,
+  Settings2,
   Send,
   Star,
   Sun,
@@ -88,7 +88,7 @@ export function Sidebar() {
         <span className="brand-mark">
           <Sailboat size={20} strokeWidth={1.8} />
         </span>
-        <span>
+          <span>
           <span className="brand-name">Vela</span>
           <span className="brand-sub" style={{ display: "block" }}>
             轻帆邮件
@@ -97,11 +97,18 @@ export function Sidebar() {
       </div>
 
       <div className="side-section">
+        <button className="compose-btn" onClick={() => actions.newCompose()} title="写新邮件">
+          <Send size={15} />
+          <span>写信</span>
+        </button>
+      </div>
+
+      <div className="side-section">
         <div className="side-label">账户</div>
         <button
           className={`side-row ${state.accountId === "all" ? "active" : ""}`}
           style={{ ["--i" as string]: 0 }}
-          onClick={() => actions.setView({ accountId: "all" })}
+          onClick={() => actions.setView({ accountId: "all", folder: "inbox", category: null })}
         >
           <Layers size={16} className="row-icon" />
           <span className="row-label">
@@ -115,7 +122,7 @@ export function Sidebar() {
             key={a.id}
             className={`side-row ${state.accountId === a.id ? "active" : ""}`}
             style={{ ["--i" as string]: i + 1 }}
-            onClick={() => actions.setView({ accountId: a.id })}
+            onClick={() => actions.setView({ accountId: a.id, folder: "inbox", category: null })}
             title={a.real ? `${a.email} · 真实邮箱` : `${a.email} · 演示账户`}
           >
             <span className="avatar sm" style={{ background: a.color }}>
@@ -188,16 +195,15 @@ export function Sidebar() {
       </div>
 
       <div className="side-foot">
-        <div className="side-user" title={state.auth?.mode === "user" ? state.auth.username : "游客模式 · 数据存于本机"}>
-          {state.auth?.mode === "user" ? (
-            <span className="avatar sm" style={{ background: "var(--accent)" }}>
-              {initialOf(state.auth.username)}
-            </span>
-          ) : null}
-          <span className="side-user-name">
-            {state.auth?.mode === "user" ? state.auth.username : "游客模式"}
-          </span>
-        </div>
+        {hasReal && (
+          <div className="side-sync-status" title="后台自动检查新邮件的状态">
+            {state.syncing
+              ? "正在检查新邮件…"
+              : state.lastSyncAt
+                ? `上次检查 ${new Date(state.lastSyncAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} · ${state.syncIntervalMin === 0 ? "手动模式" : `每 ${state.syncIntervalMin} 分钟`}`
+                : "尚未检查新邮件"}
+          </div>
+        )}
         <span style={{ display: "flex", gap: 2 }}>
           <button
             className="icon-btn"
@@ -209,19 +215,19 @@ export function Sidebar() {
           </button>
           <button
             className="icon-btn"
+            title="设置（同步频率 / AI）"
+            aria-label="AI 设置"
+            onClick={actions.openAiSettings}
+          >
+            <Settings2 size={15} />
+          </button>
+          <button
+            className="icon-btn"
             title={state.theme === "dark" ? "切换到亮色" : "切换到深色"}
             aria-label="切换主题"
             onClick={actions.toggleTheme}
           >
             {state.theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
-          </button>
-          <button
-            className="icon-btn"
-            title="退出登录"
-            aria-label="退出登录"
-            onClick={() => void actions.logout()}
-          >
-            <LogOut size={15} />
           </button>
         </span>
       </div>

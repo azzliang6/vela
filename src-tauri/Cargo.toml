@@ -31,13 +31,17 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 rand = "0.8"
 
-# ── 内嵌同步服务（账户 / 邮件持久化）──
-axum = "0.8.9"
-tower-http = { version = "0.7.1", features = ["cors"] }
-tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "macros", "time", "sync"] }
-tokio-postgres = { version = "0.7.18", features = ["with-serde_json-1"] }
-bcrypt = "0.19.3"
-uuid = { version = "1.26.1", features = ["v4"] }
+# ── AI 分析：调用 OpenAI 兼容的 chat/completions 接口 ──
+# 复用 native-tls，避免再引入一套 TLS 实现
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+
+# ── 本地存储：单文件 SQLite（bundled 静态编译，零系统依赖）──
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+# Android 上 native-tls 落到 OpenSSL：用 vendored 随包编译静态链入，免系统依赖
+[target.'cfg(target_os = "android")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 codegen-units = 1
