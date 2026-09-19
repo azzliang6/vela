@@ -53,6 +53,19 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
+      - name: Configure OpenSSL Android tool aliases
+        env:
+          NDK_VERSION: 27.3.13750724
+        run: |
+          toolchain="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          aliases="$RUNNER_TEMP/android-ndk-aliases"
+          mkdir -p "$aliases"
+          for prefix in aarch64-linux-android arm-linux-androideabi i686-linux-android x86_64-linux-android; do
+            ln -s "$toolchain/llvm-ar" "$aliases/$prefix-ar"
+            ln -s "$toolchain/llvm-ranlib" "$aliases/$prefix-ranlib"
+          done
+          echo "$aliases" >> "$GITHUB_PATH"
+
       - name: Initialize Android project
         run: pnpm tauri android init --ci --skip-targets-install
 
