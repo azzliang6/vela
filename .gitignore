@@ -8,6 +8,11 @@ server/.env
 .DS_Store
 .shots
 
+# Website release artifacts are published separately from the source tree.
+website/*.apk
+website/*.AppImage
+website/*.msi
+
 # 邮箱授权码加密密钥（本机生成，绝不入库；丢失后需重新输入授权码）
 mail.key
 vela.config.json
