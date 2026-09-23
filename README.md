@@ -2,7 +2,7 @@
 
 **现代、美观、快速的跨平台邮件客户端** —— Tauri 2 + React 19 + TypeScript。
 
-第一版以演示数据驱动，专注界面与交互打磨：编辑风「纸墨」美学（暖纸底色、墨色文字、朱砂点缀），邮件正文用衬线字体呈现，还原"读信"的仪式感。
+应用采用本地优先设计：桌面端数据保存在本机 SQLite，不需要注册账号或部署服务端；浏览器开发模式使用演示数据和 localStorage。
 
 ## 功能特性
 
@@ -17,8 +17,8 @@
 - ✉️ **完整写信流**：新邮件 / 回复 / 回复全部 / 转发，草稿自动保存，Ctrl+Enter 发送；从草稿发送后草稿自动消失
 - 🔍 **全文搜索**：主题、发件人、正文跨账户检索
 - 🌗 **亮 / 暗双主题**：暖纸亮色 + 暖炭暗色，跟随系统偏好，随时切换（`T`）
-- 👤 **账户体系**：注册 / 登录 / 会话保持（bcrypt 加盐 + Bearer 令牌），每用户邮箱数据在 PostgreSQL 中完全隔离；也可一键进入「游客模式」纯本地使用
-- 💾 **双通道持久化**：登录用户数据落 PostgreSQL（防抖全量同步、崩溃/刷新可恢复）；游客模式写 localStorage；主题与列表密度偏好始终本地保存
+- 💾 **本地持久化**：桌面端邮件、已读/星标状态、AI 分析结果和邮箱配置保存在应用数据目录的 SQLite 文件中；浏览器开发模式使用 localStorage 演示
+- 🔒 **本地隐私**：不提供应用账号体系，不依赖远程同步服务；邮箱授权码以 AES-256-GCM 加密后保存在本机
 
 ## 键盘快捷键
 
@@ -35,34 +35,16 @@
 
 ## 快速开始
 
-前置：Node 20+、pnpm、PostgreSQL（仅登录功能需要，游客模式不需要）。
+浏览器开发模式前置：Node 20+、pnpm。桌面端构建还需要 Rust 工具链（见下文）。
 
 **1. 安装依赖**
 
 ```bash
 pnpm install
-cd server && pnpm install && cd ..
+pnpm dev        # 前端开发服务器，通常为 http://localhost:5173
 ```
 
-**2. 配置数据库**（没有 PG 可跳过，直接用游客模式）
-
-复制 `server/.env.example` 为 `server/.env` 并填入你的连接串：
-
-```ini
-VELA_DB_URL=postgres://用户名:密码@localhost:5432/数据库名   # 密码中的 @ 需写成 %40
-VELA_PORT=3210
-```
-
-表结构（`users` / `sessions` / `emails`）首次启动时自动创建，无需手工迁移。
-
-**3. 启动（两个终端）**
-
-```bash
-pnpm server     # 终端 1：同步服务 http://127.0.0.1:3210（注册/登录/邮件持久化）
-pnpm dev        # 终端 2：前端 http://localhost:1420
-```
-
-打开页面 → 注册一个账户即可开始（新账户自动播种演示邮件）；或点「游客模式」纯本地体验。
+打开页面即可进入演示收件箱。浏览器模式不连接真实邮箱；真实 IMAP/SMTP 功能需要运行桌面版。
 
 ## 桌面应用（Windows / macOS / Linux）
 
@@ -85,19 +67,9 @@ pnpm tauri build  # 产出各平台安装包（msi/dmg/deb/AppImage…）
 
 安装包输出在 `src-tauri/target/release/bundle/`。
 
-> **桌面版自带同步服务**：应用启动时会在进程内拉起一套 Rust 实现的同款 API（`src-tauri/src/server.rs`，监听 `127.0.0.1:3210`），**无需再单独运行 `pnpm server`**，装上即用。数据库不可用时仅登录不可用，游客模式不受影响。
+> 桌面版使用应用数据目录中的单文件 SQLite 数据库 `vela.db`，启动后自动创建，无需注册、登录或启动额外服务。删除该文件会清空本地邮件和邮箱配置，请先备份。
 
-> 桌面版的数据库连接按此优先级解析：环境变量 `VELA_DB_URL` → 可执行文件同目录的 `vela.config.json` → 应用配置目录 `config.json` → 内置默认（本机开发库）。`vela.config.json` 支持两种写法：
-> ```json
-> { "dsn": "postgres://user:pass@localhost:5432/db" }
-> ```
-> ```json
-> { "host": "localhost", "port": 5432, "user": "postgres", "password": "明文密码（无需转义）", "database": "postgres" }
-> ```
-
-> **浏览器开发模式**则使用 Node 版同步服务（`pnpm server`），两者接口完全一致、共用同一个数据库。
-
-> **Windows 构建已实测通过**（Rust 1.98 + MSVC 14.44 + Win SDK 10.0.26100）：产出 `Vela_0.2.0_x64_en-US.msi`、`Vela_0.2.0_x64-setup.exe`（NSIS）与便携版 `vela.exe`，窗口启动、WebView2 渲染与内嵌服务接口验证正常。
+> **Windows 构建已实测通过**（Rust 1.98 + MSVC 14.44 + Win SDK 10.0.26100）：产出 `Vela_0.2.0_x64_en-US.msi`、`Vela_0.2.0_x64-setup.exe`（NSIS）与便携版 `vela.exe`，窗口启动、WebView2 渲染与本地数据读写验证正常。
 
 > 如需重新生成全套图标：`pnpm tauri icon src-tauri/icons/icon.png`
 
@@ -106,27 +78,27 @@ pnpm tauri build  # 产出各平台安装包（msi/dmg/deb/AppImage…）
 ```
 vela-mail/
 ├── src/
-│   ├── components/      # LoginScreen / Sidebar / MailList / MailViewer / ComposeWindow / CommandPalette / Toasts
-│   ├── store/           # MailContext：全局状态、认证会话、业务动作、双通道持久化
-│   ├── services/        # api（同步服务客户端）/ mailService（过滤搜索格式化）/ classifyService（本地规则分类）
-│   ├── data/            # 演示数据：3 账户 × 28 封真实感邮件（相对日期生成）
+│   ├── components/      # Sidebar / MailList / MailViewer / ComposeWindow / CommandPalette / Toasts
+│   ├── store/           # MailContext：本地会话、业务动作和持久化
+│   ├── services/        # 本地数据库桥接、邮箱协议、AI 分析和本地分类
+│   ├── data/            # 浏览器演示数据：3 个演示账户和示例邮件
 │   ├── hooks/           # useHotkeys 全局快捷键
 │   └── styles/          # 设计令牌 + 全局样式（纸墨美学）
-├── server/              # Node 同步服务（浏览器开发模式用；Express + pg + bcryptjs）
-│   ├── index.mjs        # 注册/登录/会话/邮件同步 API，建表自动执行
-│   └── .env             # 数据库连接配置（gitignore）
+├── scripts/             # Android 构建准备和 IMAP/SMTP 模拟服务器
 ├── src-tauri/           # Tauri 2 桌面壳（Rust）
-│   └── src/server.rs    # 内嵌同步服务（axum + tokio-postgres + bcrypt），桌面版随应用启动
+│   ├── src/localdb.rs   # 本地 SQLite 数据库
+│   └── src/mail/        # IMAP/SMTP、授权码加密和邮箱同步
 └── index.html
 ```
 
-## 数据模型
+## 本地数据
 
-- **`users`**：账户（用户名唯一 + bcrypt 密码哈希）
-- **`sessions`**：登录令牌（Bearer，登出即删）
-- **`emails`**：每用户一份完整邮箱（`(user_id, id)` 主键，JSONB 存发件人/收件人/附件）
-- **同步策略**：前端状态变更 800ms 防抖后全量 upsert，并删除服务端多余行；所有查询按 `user_id` 过滤，账户间互不可见
-- **双实现**：`server/index.mjs`（Node，浏览器开发用）与 `src-tauri/src/server.rs`（Rust，桌面内嵌）实现同一套 API 与同一张表，前端无感知
+桌面端启动时会在应用数据目录创建 `vela.db`，使用 SQLite 保存：
+
+- **`emails`**：邮件正文、文件夹、已读/星标状态、分类和 AI 摘要
+- **`mailbox_accounts`**：已接入的真实邮箱、同步游标和加密后的授权码
+- 前端状态变化后会防抖写入本地数据库，不依赖网络或远程账号
+- 浏览器开发模式没有 Tauri 本地数据库，会回退到演示数据和 localStorage
 
 ## 接入真实邮箱
 
@@ -138,10 +110,9 @@ vela-mail/
 **使用步骤**
 
 1. `pnpm tauri dev` 启动桌面版（或安装 `pnpm tauri build` 产出的安装包）
-2. 注册 / 登录一个应用账户
-3. 侧栏底部点「**+ 接入真实邮箱**」
-4. 选服务商（按邮箱域名会自动匹配）→ 填邮箱地址与**授权码** → 先「测试连接」再「保存并接入」
-5. 点侧栏「同步」按钮收取邮件；真实账户名后有个小圆点标记
+2. 侧栏底部点「**+ 接入真实邮箱**」
+3. 选服务商（按邮箱域名会自动匹配）→ 填邮箱地址与**授权码** → 先「测试连接」再「保存并接入」
+4. 点侧栏「同步」按钮收取邮件；真实账户名后有个小圆点标记
 
 **关于授权码**：这里必须填邮箱服务商给的「授权码 / 应用专用密码」，
 **不是网页登录密码**。各服务商开启方式不同，向导里会显示对应提示：
@@ -196,11 +167,11 @@ vela-mail/
 
 **凭证安全**
 
-授权码用 **AES-256-GCM** 加密后存入 PostgreSQL 的 `mailbox_accounts` 表，数据库里只有密文，
+授权码用 **AES-256-GCM** 加密后存入本地 SQLite 的 `mailbox_accounts` 表，数据库里只有密文，
 前端永远拿不到明文。密钥来源优先级：
 
-1. 环境变量 `VELA_SECRET`（推荐，适合多设备统一管理）
-2. 应用配置目录下的 `mail.key`（不存在时首次运行自动生成随机密钥）
+1. 环境变量 `VELA_SECRET`（可选）
+2. 应用数据目录下的 `mail.key`（不存在时首次运行自动生成随机密钥）
 
 > 换了密钥后旧密文无法解密，需要重新输入授权码。
 
@@ -211,25 +182,25 @@ src-tauri/src/
 ├── mail/                  # 真实邮箱接入层
 │   ├── providers.rs       # 服务商预设（服务器地址 / 授权码提示）
 │   ├── crypto.rs          # AES-256-GCM 凭证加密
-│   ├── store.rs           # 邮箱账户与同步游标的 PostgreSQL 存取
+│   ├── store.rs           # 邮箱账户与同步游标的 SQLite 存取
 │   ├── imap.rs            # IMAP 收信 + 状态回写（已读/星标/归档/删除）
 │   ├── smtp.rs            # SMTP 发信
 │   ├── types.rs           # 与前端的数据契约
 │   └── commands.rs        # 暴露给前端的 Tauri command
-└── server.rs              # 内嵌同步服务：应用账户 + 邮件持久化
+└── localdb.rs             # 本地邮件与邮箱账户数据库
 ```
 
 前端在两种环境自动选择后端：
 
-| 环境 | 账户 / 持久化 | 真实邮箱 |
+| 环境 | 数据与持久化 | 真实邮箱 |
 | --- | --- | --- |
-| 桌面（Tauri） | Rust 内嵌服务 | Rust command（完整可用） |
-| 浏览器（`pnpm dev`） | Node 服务 `server/` | 不可用（明确提示） |
+| 桌面（Tauri） | 本地 SQLite（应用数据目录） | Rust command（完整可用） |
+| 浏览器（`pnpm dev`） | 演示数据 + localStorage | 不可用（明确提示） |
 
 ## 测试
 
 ```bash
-# Rust 单元测试 + 集成测试（共 58 个）
+# Rust 单元测试
 cd src-tauri && cargo test
 
 # 端到端测试需要模拟 IMAP/SMTP 服务器（普通邮箱 + 大邮箱各一个）：
@@ -238,7 +209,7 @@ MOCK_BULK=1 python scripts/mock_mail_server.py 11243 11026 &
 cd src-tauri && cargo test
 ```
 
-集成测试覆盖：登录鉴权、增量拉取、**历史邮件分批回填（1000 封不重不漏）**、GBK 中文解码、
+集成测试覆盖：IMAP 认证、增量拉取、**历史邮件分批回填（1000 封不重不漏）**、GBK 中文解码、
 已读/星标回写、文件夹移动、EXAMINE 切换选中邮箱的回归场景。
 
 模拟服务器支持 `MOCK_BULK=1` 环境变量生成一个大邮箱（默认 1000 封），用于验证回填逻辑；`MOCK_BULK_COUNT` 可改邮件数量。
@@ -247,10 +218,10 @@ cd src-tauri && cargo test
 
 - 草稿同步到服务器（目前草稿仅本地保存）
 - 附件下载 / 上传（当前只同步附件元信息）
-- OAuth2 登录（Gmail / Outlook 免授权码，体验更好）
+- OAuth2 认证（Gmail / Outlook 免授权码，体验更好）
 - IMAP IDLE 实时推送（替代手动/定时同步）
 - 分类引擎接入 LLM API（`classifyService.ts` 接口不变）
 
 ## 技术栈
 
-React 19 · TypeScript 7 · Vite 8 · Tauri 2 · Rust（imap / lettre / mail-parser / aes-gcm）· axum + tokio-postgres · PostgreSQL · lucide-react · Fontsource 自托管字体（Bricolage Grotesque / Outfit / Newsreader）
+React 19 · TypeScript 7 · Vite 8 · Tauri 2 · Rust（imap / lettre / mail-parser / aes-gcm / rusqlite）· SQLite · lucide-react · Fontsource 自托管字体（Bricolage Grotesque / Outfit / Newsreader）
