@@ -97,6 +97,8 @@ export interface Email {
   serverFolder?: "inbox" | "sent";
   /** RFC5322 Message-ID，回复时用于串起会话 */
   messageId?: string;
+  /** true = 本次同步增量新到的收件箱未读邮件；仅同步结果里出现，用于弹桌面通知，不持久化 */
+  isNewArrival?: boolean;
   /** true = 来自真实邮箱服务器 */
   real?: boolean;
 }

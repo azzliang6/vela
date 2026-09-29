@@ -13,6 +13,11 @@ import {
   testAiSettings,
   type AiSettings,
 } from "../services/aiService";
+import {
+  notificationsEnabled,
+  sendTestNotification,
+  setNotificationsEnabled,
+} from "../services/notificationService";
 
 /**
  * AI 设置面板：服务商 / API Key / 模型 / 输出语言 / 提示词模板。
@@ -23,9 +28,10 @@ export function AISettingsDialog() {
   const { state, dispatch, actions } = useMail();
 
   const [settings, setSettings] = useState<AiSettings>(loadAiSettings);
-  const [busy, setBusy] = useState<"test" | null>(null);
+  const [busy, setBusy] = useState<"test" | "notify" | null>(null);
   const [ok, setOk] = useState("");
   const [error, setError] = useState("");
+  const [desktopNotify, setDesktopNotify] = useState(notificationsEnabled);
 
   const preset = useMemo(
     () => AI_PRESETS.find((p) => p.id === settings.providerId),
@@ -62,6 +68,21 @@ export function AISettingsDialog() {
     try {
       const reply = await testAiSettings(settings);
       setOk(`连接成功，模型回复：「${reply.slice(0, 40)}」`);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doTestNotify = async () => {
+    setBusy("notify");
+    setError("");
+    setOk("");
+    try {
+      const sent = await sendTestNotification();
+      if (sent) setOk("测试通知已发送，请查看系统通知中心");
+      else setError("系统通知权限被拒绝 —— 请在系统设置中允许 Vela 发送通知");
     } catch (e) {
       setError(errText(e));
     } finally {
@@ -114,6 +135,49 @@ export function AISettingsDialog() {
                 <option value={60}>每 1 小时</option>
               </select>
             </label>
+
+            {isDesktop() && (
+              <>
+                <label className="ai-toggle">
+                  <input
+                    type="checkbox"
+                    checked={desktopNotify}
+                    onChange={(e) => {
+                      setDesktopNotify(e.target.checked);
+                      setNotificationsEnabled(e.target.checked);
+                      setError("");
+                      setOk("");
+                    }}
+                  />
+                  <span>来新邮件时发送系统通知（显示在系统通知中心）</span>
+                </label>
+                {desktopNotify && (
+                  <>
+                    <div className="login-field">
+                      <span>
+                        <button
+                          className="chip"
+                          style={{ ["--chip" as string]: "var(--muted)" }}
+                          title="弹出一条样例通知，验证系统权限"
+                          disabled={busy !== null}
+                          onClick={() => void doTestNotify()}
+                        >
+                          {busy === "notify" && <Loader2 size={10} className="spin" />}
+                          发送测试通知
+                        </button>
+                      </span>
+                    </div>
+                    <div className="mailbox-note">
+                      <AlertCircle size={15} />
+                      <span>
+                        只提醒增量新到的收件箱未读邮件；首次接入、历史回填与已发送不提醒。
+                        通知依赖应用在运行中（随自动检查发出）。
+                      </span>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
 
             <div className="settings-section-label">AI 分析</div>
 

@@ -200,7 +200,17 @@ fn fetch_folder(
     // 若改取最新的一批，last_uid 会直接跳过中间那些邮件（那些邮件将永远拉不到）。
     let new_done = new_items.len() <= cap;
     let new_batch = &new_items[..new_items.len().min(cap)];
+    let before_new = out.mails.len();
     download_bodies(session, folder, account_id, server_folder, new_batch, out)?;
+
+    // 增量阶段拉到的邮件是「真正新到」的：只有收件箱 + 未读才打标，前端据此弹桌面通知。
+    // 必须限定 uid > since_uid——IMAP 的 `N:*` 区间在没有新邮件时也会把最后一封捎回来
+    // （既有行为，幂等重下），不限定的话最新一封未读邮件每轮同步都会被误判为新到。
+    if server_folder == ServerFolder::Inbox {
+        for m in &mut out.mails[before_new..] {
+            m.is_new_arrival = m.uid > since_uid && !m.read;
+        }
+    }
 
     let next_last_uid = new_batch
         .iter()
@@ -413,6 +423,8 @@ fn parse_message(
         read: seen,
         starred: flagged,
         attachments,
+        // 解析层不区分「新到」还是「回填」，由 fetch_folder 按阶段打标
+        is_new_arrival: false,
     })
 }
 

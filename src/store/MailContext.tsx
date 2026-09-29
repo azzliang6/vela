@@ -25,6 +25,7 @@ import { filterEmails } from "../services/mailService";
 import { analyzeEmail, classifyRules } from "../services/classifyService";
 import { deleteEmails, getEmails, isDesktop, syncEmails, type ServerEmail } from "../services/api";
 import { realMail, realMailSupported } from "../services/realMailService";
+import { notifyNewMail } from "../services/notificationService";
 import { aiConfigured, analyzeWithAi, loadAiSettings, type AiSettings as AiSettingsType } from "../services/aiService";
 import { errText } from "../services/errText";
 
@@ -1121,6 +1122,12 @@ export function MailProvider({ children }: { children: ReactNode }) {
           // 先算真正的新邮件（id 尚未在本地），提示才不会虚报
           const knownIds = new Set(state.emails.map((e) => e.id));
           const fresh = incoming.filter((e) => !knownIds.has(e.id));
+
+          // 桌面通知：Rust 端只给「增量新到的收件箱未读」打了 isNewArrival 标记，
+          // 历史回填 / 已发送 / 首次接入 / 在其它设备已读过的邮件不会触发。
+          // 浏览器环境、开关关闭或权限被拒时 notifyNewMail 内部自动跳过。
+          const arrivals = fresh.filter((e) => e.isNewArrival);
+          if (arrivals.length) void notifyNewMail(arrivals);
 
           dispatch({ type: "mergeReal", emails: incoming });
           dispatch({ type: "syncedAt", ts: Date.now() });

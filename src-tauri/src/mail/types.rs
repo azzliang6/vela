@@ -104,6 +104,13 @@ pub struct FetchedMail {
     pub read: bool,
     pub starred: bool,
     pub attachments: Vec<FetchedAttachment>,
+    /// 是否为「本次同步新到」的收件箱未读邮件（增量拉取阶段下载）。
+    ///
+    /// 仅用于前端弹系统通知；首次接入、UIDVALIDITY 重置后的全量重来、
+    /// 历史回填和已发送文件夹的邮件都保持 false，避免接入老邮箱瞬间
+    /// 弹出成百上千条通知。
+    #[serde(default)]
+    pub is_new_arrival: bool,
 }
 
 impl FetchedMail {
@@ -169,6 +176,7 @@ impl FetchedMail {
             "serverFolder": folder,
             "remoteName": self.remote_name,
             "messageId": self.message_id,
+            "isNewArrival": self.is_new_arrival,
             "real": true,
         })
     }
@@ -229,6 +237,7 @@ mod tests {
                 size_kb: 12,
                 kind: "pdf".into(),
             }],
+            is_new_arrival: false,
         }
     }
 
@@ -260,6 +269,13 @@ mod tests {
     fn empty_cc_becomes_null() {
         let j = sample().to_email_json();
         assert!(j["cc"].is_null(), "无抄送时前端期望 null 而非空数组");
+    }
+
+    #[test]
+    fn new_arrival_flag_passes_through() {
+        let mut e = sample();
+        e.is_new_arrival = true;
+        assert_eq!(e.to_email_json()["isNewArrival"], serde_json::json!(true));
     }
 
     #[test]
