@@ -40,7 +40,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 # ── 桌面通知：来新邮件时弹系统通知（Windows 通知中心 / macOS / Linux）──
-tauri-plugin-notification = "2"
+# 精确锁 2.4.0：该版本要求 tauri ^2.10，与本仓库锁定的 tauri 2.11.x /
+# @tauri-apps/api 2.11.x 同 minor；2.5.0 会强制 tauri ^2.12，触发 Tauri CLI
+# 的 crate 与 npm 包版本一致性校验失败（tauri build 直接报错）。
+tauri-plugin-notification = "=2.4.0"
 
 # Android 上 native-tls 落到 OpenSSL：用 vendored 随包编译静态链入，免系统依赖
 [target.'cfg(target_os = "android")'.dependencies]
