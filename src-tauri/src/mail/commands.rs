@@ -61,7 +61,7 @@ impl AddAccountInput {
 ///
 /// 密钥来源：`VELA_SECRET` 环境变量优先；否则用应用配置目录下的 `mail.key`
 /// （不存在时自动生成一个随机密钥）。
-fn crypto(app: &tauri::AppHandle) -> CmdResult<super::Crypto> {
+pub(crate) fn crypto(app: &tauri::AppHandle) -> CmdResult<super::Crypto> {
     if let Some(secret) = super::crypto::load_secret(None) {
         return Ok(super::Crypto::from_secret(&secret));
     }

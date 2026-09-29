@@ -3,9 +3,10 @@
 //! 子模块：
 //! - [`providers`]：QQ / 163 / Gmail 等服务商预设，自动填服务器地址
 //! - [`crypto`]：授权码的 AES-256-GCM 加密，数据库里只存密文
-//! - [`store`]：邮箱账户与同步游标的 PostgreSQL 存取
+//! - [`store`]：邮箱账户与同步游标的 SQLite 存取
 //! - [`imap`]：IMAP 收信（增量拉取）+ 已读/星标/归档/删除回写
 //! - [`smtp`]：SMTP 发信
+//! - [`watcher`]：IMAP IDLE 后台监控，新邮件到达实时推送给前端
 //! - [`commands`]：暴露给前端的 Tauri command
 //!
 //! 数据流：
@@ -16,6 +17,10 @@
 //!     → imap 拉新邮件
 //!     → store 写回游标
 //!   → 返回邮件 JSON 数组给前端
+//!
+//! 后台 watcher（IDLE 长连接）
+//!   → imap::idle_fetch_new 拉到增量新邮件
+//!   → emit("vela://new-mail") 推给前端（合并状态 + 弹系统通知）
 //! ```
 
 pub mod commands;
@@ -25,5 +30,6 @@ pub mod providers;
 pub mod smtp;
 pub mod store;
 pub mod types;
+pub mod watcher;
 
 pub use crypto::Crypto;

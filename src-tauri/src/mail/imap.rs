@@ -607,6 +607,100 @@ pub fn sync_account(cfg: &MailServerConfig, cursors: &[MailboxCursor]) -> Result
     Ok(result)
 }
 
+/// 实时监控收件箱：IDLE 长连接等服务器推送，一有新邮件就做一次「仅增量」拉取。
+///
+/// 与 [`sync_account`] 的分工：
+/// - 只看收件箱（通知只关心新到邮件；已发送同步与历史回填仍由常规同步负责）
+/// - 只推进 `last_uid`，不碰回填游标；返回的游标由调用方与既有游标合并后写回
+/// - 连接长持有：先查一次增量，没有就进入 IDLE；IDLE 到期（RFC 2177 建议至少
+///   每 29 分钟重发一次，这里留足余量）后重查增量再继续 IDLE
+///
+/// 仅在拉到新邮件时返回；连接 / 协议错误原样上抛，由调用方退避重连。
+/// 服务器不支持 IDLE 时退化为轮询（每分钟查一次增量）。
+pub fn idle_fetch_new(
+    cfg: &MailServerConfig,
+    cursors: &[MailboxCursor],
+    idle_wait: std::time::Duration,
+) -> Result<FetchResult, String> {
+    let mut session = connect(cfg)?;
+    let account_id = cfg.email.clone();
+
+    let idle_capable = {
+        let caps = session
+            .capabilities()
+            .map_err(|e| format!("获取服务器能力失败：{e}"))?;
+        caps.has_str("IDLE")
+    };
+
+    loop {
+        if let Some(result) = fetch_new_inbox(&mut session, &account_id, cursors)? {
+            let _ = session.logout();
+            return Ok(result);
+        }
+        if idle_capable {
+            let handle = session.idle().map_err(|e| format!("进入 IDLE 失败：{e}"))?;
+            // 无论超时还是服务器推送（新邮件 / 旗标 / 删除都算）都回到循环头
+            // 重查一次增量：有新邮件就拉取返回，没有就继续等下一轮
+            handle
+                .wait_with_timeout(idle_wait)
+                .map_err(|e| format!("IDLE 等待中断：{e}"))?;
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+}
+
+/// 拉取收件箱自游标 `last_uid` 之后的增量邮件；没有新邮件返回 `None`。
+///
+/// 语义与 [`fetch_folder`] 的阶段一一致（含「截断保最旧」策略），但：
+/// - 没有游标（账户尚未做过首次同步）时不越俎代庖，等常规同步建立游标
+/// - UIDVALIDITY 变化时直接跳过，等常规同步全量重来，实时通道不掺和
+fn fetch_new_inbox(
+    session: &mut ImapSession,
+    account_id: &str,
+    cursors: &[MailboxCursor],
+) -> Result<Option<FetchResult>, String> {
+    let Some(c) = cursors.iter().find(|c| c.folder == ServerFolder::Inbox) else {
+        return Ok(None);
+    };
+
+    let mailbox = session
+        .select("INBOX")
+        .map_err(|e| format!("无法打开收件箱：{e}"))?;
+    let uid_validity = mailbox.uid_validity.unwrap_or(0);
+    if c.uid_validity != 0 && uid_validity != 0 && c.uid_validity != uid_validity {
+        return Ok(None);
+    }
+
+    // `N:*` 在没有新邮件时也会捎回最后一封，必须再按 uid > last_uid 过滤
+    let items = list_uids(session, &format!("{}:*", c.last_uid + 1), "INBOX")?;
+    let new_items: Vec<(u32, bool, bool)> = items
+        .into_iter()
+        .filter(|(u, _, _)| *u > c.last_uid)
+        .collect();
+    if new_items.is_empty() {
+        return Ok(None);
+    }
+
+    let cap = MAX_FETCH_PER_SYNC;
+    let batch = &new_items[..new_items.len().min(cap)];
+    let mut result = FetchResult::default();
+    let before = result.mails.len();
+    download_bodies(session, "INBOX", account_id, ServerFolder::Inbox, batch, &mut result)?;
+    for m in &mut result.mails[before..] {
+        m.is_new_arrival = !m.read;
+    }
+
+    result.cursors.push(MailboxCursor {
+        folder: ServerFolder::Inbox,
+        last_uid: batch.iter().map(|(u, _, _)| *u).max().unwrap_or(c.last_uid),
+        backfill_uid: c.backfill_uid,
+        uid_validity,
+        remote_name: "INBOX".into(),
+    });
+    Ok(Some(result))
+}
+
 /// 解析归档 / 垃圾箱的目标文件夹名
 pub fn resolve_server_folder(
     cfg: &MailServerConfig,

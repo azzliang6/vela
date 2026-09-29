@@ -9,9 +9,72 @@
  */
 
 import { isDesktop } from "./realMailService";
+import { classifyRules } from "./classifyService";
 import type { Email } from "../types";
 
 const LS_KEY = "vela:desktop-notifications";
+const LS_FILTER_KEY = "vela:notify-filter-v1";
+
+/** 通知过滤设置：什么情况下弹系统通知（应用内 toast 不受影响） */
+export interface NotifyFilter {
+  /** 只提醒本地规则判为「重要」的邮件 */
+  importantOnly: boolean;
+  /** 免打扰时段内不弹系统通知 */
+  quietEnabled: boolean;
+  /** "HH:MM"，起止可跨午夜（如 22:00 → 08:00） */
+  quietStart: string;
+  quietEnd: string;
+}
+
+const DEFAULT_FILTER: NotifyFilter = {
+  importantOnly: false,
+  quietEnabled: false,
+  quietStart: "22:00",
+  quietEnd: "08:00",
+};
+
+/** 读取通知过滤设置（与默认值合并，坏值回退默认） */
+export function loadNotifyFilter(): NotifyFilter {
+  try {
+    const raw = localStorage.getItem(LS_FILTER_KEY);
+    if (!raw) return { ...DEFAULT_FILTER };
+    const saved = JSON.parse(raw) as Partial<NotifyFilter>;
+    return {
+      importantOnly: Boolean(saved.importantOnly),
+      quietEnabled: Boolean(saved.quietEnabled),
+      quietStart: typeof saved.quietStart === "string" ? saved.quietStart : DEFAULT_FILTER.quietStart,
+      quietEnd: typeof saved.quietEnd === "string" ? saved.quietEnd : DEFAULT_FILTER.quietEnd,
+    };
+  } catch {
+    return { ...DEFAULT_FILTER };
+  }
+}
+
+/** 保存通知过滤设置（立即持久化） */
+export function saveNotifyFilter(f: NotifyFilter): void {
+  localStorage.setItem(LS_FILTER_KEY, JSON.stringify(f));
+}
+
+/** "HH:MM" → 当天分钟数；解析失败返回 NaN */
+function minutesOf(hm: string): number {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hm.trim());
+  if (!m) return Number.NaN;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return Number.NaN;
+  return h * 60 + min;
+}
+
+/** 当前是否处于免打扰时段（支持跨午夜区间） */
+export function inQuietHours(now = new Date()): boolean {
+  const f = loadNotifyFilter();
+  if (!f.quietEnabled) return false;
+  const start = minutesOf(f.quietStart);
+  const end = minutesOf(f.quietEnd);
+  if (Number.isNaN(start) || Number.isNaN(end) || start === end) return false;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return start < end ? cur >= start && cur < end : cur >= start || cur < end;
+}
 
 /** 桌面通知是否开启（默认开） */
 export function notificationsEnabled(): boolean {
@@ -53,29 +116,37 @@ function brief(e: Email, withAccount: boolean): string {
 /**
  * 同步发现新到邮件时弹系统通知。
  *
- * 多封时聚合成一条（列出前 3 封摘要），避免一次同步弹一串通知刷屏。
+ * 依次应用过滤：总开关 → 免打扰时段 → 仅重要邮件（本地规则即时判断，
+ * 不依赖 AI）。多封时聚合成一条（列出前 3 封摘要），避免刷屏。
  * 任何失败都静默降级——通知是锦上添花，不能影响同步流程。
  */
 export async function notifyNewMail(arrivals: Email[]): Promise<void> {
   if (!arrivals.length || !isDesktop() || !notificationsEnabled()) return;
   try {
+    if (inQuietHours()) return;
+    const filter = loadNotifyFilter();
+    const toNotify = filter.importantOnly
+      ? arrivals.filter((e) => classifyRules(e) === "important")
+      : arrivals;
+    if (!toNotify.length) return;
+
     if (!(await ensureNotificationPermission())) return;
     const p = await plugin();
-    const withAccount = new Set(arrivals.map((e) => e.accountId)).size > 1;
-    if (arrivals.length === 1) {
+    const withAccount = new Set(toNotify.map((e) => e.accountId)).size > 1;
+    if (toNotify.length === 1) {
       p.sendNotification({
         title: "Vela 轻帆 · 新邮件",
-        body: brief(arrivals[0], withAccount),
+        body: brief(toNotify[0], withAccount),
       });
       return;
     }
-    const preview = arrivals
+    const preview = toNotify
       .slice(0, 3)
       .map((e) => brief(e, withAccount))
       .join("\n");
-    const more = arrivals.length > 3 ? `\n…还有 ${arrivals.length - 3} 封` : "";
+    const more = toNotify.length > 3 ? `\n…还有 ${toNotify.length - 3} 封` : "";
     p.sendNotification({
-      title: `Vela 轻帆 · 收到 ${arrivals.length} 封新邮件`,
+      title: `Vela 轻帆 · 收到 ${toNotify.length} 封新邮件`,
       body: `${preview}${more}`,
     });
   } catch (e) {

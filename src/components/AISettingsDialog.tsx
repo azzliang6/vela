@@ -14,9 +14,12 @@ import {
   type AiSettings,
 } from "../services/aiService";
 import {
+  loadNotifyFilter,
   notificationsEnabled,
+  saveNotifyFilter,
   sendTestNotification,
   setNotificationsEnabled,
+  type NotifyFilter,
 } from "../services/notificationService";
 
 /**
@@ -32,6 +35,7 @@ export function AISettingsDialog() {
   const [ok, setOk] = useState("");
   const [error, setError] = useState("");
   const [desktopNotify, setDesktopNotify] = useState(notificationsEnabled);
+  const [notifyFilter, setNotifyFilter] = useState<NotifyFilter>(loadNotifyFilter);
 
   const preset = useMemo(
     () => AI_PRESETS.find((p) => p.id === settings.providerId),
@@ -88,6 +92,14 @@ export function AISettingsDialog() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const patchFilter = (p: Partial<NotifyFilter>) => {
+    setNotifyFilter((f) => {
+      const next = { ...f, ...p };
+      saveNotifyFilter(next);
+      return next;
+    });
   };
 
   const doSave = () => {
@@ -167,11 +179,46 @@ export function AISettingsDialog() {
                         </button>
                       </span>
                     </div>
+                    <label className="ai-toggle">
+                      <input
+                        type="checkbox"
+                        checked={notifyFilter.importantOnly}
+                        onChange={(e) => patchFilter({ importantOnly: e.target.checked })}
+                      />
+                      <span>只提醒重要邮件（本地规则即时判断，不消耗 AI 额度）</span>
+                    </label>
+                    <label className="ai-toggle">
+                      <input
+                        type="checkbox"
+                        checked={notifyFilter.quietEnabled}
+                        onChange={(e) => patchFilter({ quietEnabled: e.target.checked })}
+                      />
+                      <span>免打扰时段（时段内不弹系统通知，应用内提示不受影响）</span>
+                    </label>
+                    {notifyFilter.quietEnabled && (
+                      <div className="login-field">
+                        <span>免打扰起止时间（可跨午夜）</span>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <input
+                            type="time"
+                            value={notifyFilter.quietStart}
+                            onChange={(e) => patchFilter({ quietStart: e.target.value })}
+                          />
+                          <span>至</span>
+                          <input
+                            type="time"
+                            value={notifyFilter.quietEnd}
+                            onChange={(e) => patchFilter({ quietEnd: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                    )}
                     <div className="mailbox-note">
                       <AlertCircle size={15} />
                       <span>
-                        只提醒增量新到的收件箱未读邮件；首次接入、历史回填与已发送不提醒。
-                        通知依赖应用在运行中（随自动检查发出）。
+                        桌面版通过 IMAP IDLE 实时感知新邮件（秒级提醒），关闭窗口后仍在
+                        系统托盘中后台运行；真正退出请用托盘菜单「退出」。首次接入、
+                        历史回填与已发送不会提醒。
                       </span>
                     </div>
                   </>

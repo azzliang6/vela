@@ -1236,6 +1236,60 @@ export function MailProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(iv);
   }, [state.booted, state.auth?.mode, hasMailboxes, state.syncIntervalMin]);
 
+  /* ———— 桌面事件：IDLE 实时新邮件到达 + 托盘「立即同步」 ———— */
+  const emailsRef = useRef(state.emails);
+  useEffect(() => {
+    emailsRef.current = state.emails;
+  });
+  useEffect(() => {
+    if (!state.booted || state.auth?.mode !== "user" || !realMailSupported()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        // 后台 IDLE 拉到新邮件：合并进状态并弹通知（秒级延迟，替代轮询等待）
+        const offNew = await listen<{ accountId: string; emails: Email[] }>(
+          "vela://new-mail",
+          (ev) => {
+            const incoming = ev.payload.emails ?? [];
+            if (!incoming.length) return;
+            const knownIds = new Set(emailsRef.current.map((e) => e.id));
+            const fresh = incoming.filter((e) => !knownIds.has(e.id));
+            // 前台同步可能已经处理过这批邮件，只有真正的新邮件才提示
+            if (!fresh.length) return;
+            dispatch({ type: "mergeReal", emails: incoming });
+            dispatch({ type: "syncedAt", ts: Date.now() });
+            dispatch({
+              type: "toastPush",
+              toast: { id: Date.now(), text: `已收取 ${fresh.length} 封新邮件`, tone: "success" },
+            });
+            void notifyNewMail(fresh);
+          },
+        );
+        // 托盘菜单「立即同步」：复用前台的同步编排（转图标、提示、游标对账都在那里）
+        const offSync = await listen("vela://tray-sync", () => {
+          void autoSyncRef.current(false, false);
+        });
+        if (disposed) {
+          offNew();
+          offSync();
+          return;
+        }
+        unlisten = () => {
+          offNew();
+          offSync();
+        };
+      } catch (e) {
+        console.warn("[vela] 注册桌面事件监听失败：", e);
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [state.booted, state.auth?.mode]);
+
   /* ———— AI 批量/自动分析共用：同一时间只跑一批，逐封带间隔 ———— */
   const aiBatchBusyRef = useRef(false);
   /** 本会话内已尝试过自动分析的邮件 id（失败也不重试，避免坏 Key 造成请求风暴） */
