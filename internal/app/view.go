@@ -337,6 +337,34 @@ func (a *App) detail(c *ui.Context, e *core.Email) {
 		}).OnClick(func() { a.Analyze(id) }))
 	})
 	ui.Box(c).Height(1).Background(t.Border)
+	// HTML 正文：抬头（主题、发件人、AI 摘要、附件）也渲染进同一个文档，
+	// 与正文一起滚动，WebView 直接铺满阅读区剩余部分，没有任何边框或内边距容器。
+	if e.HTMLBody != "" && a.body != nil && !a.bodyFailed[e.ID] {
+		th := BodyThemeFor(t)
+		doc, _ := MailDocument(e.HTMLBody, th, a.headerInfo(e))
+		if a.body.Show(e.ID+"|"+docKey(doc), doc, th.Bg) {
+			ui.WebView(c, a.body.Native()).Grow(1)
+			return
+		}
+	}
+	text := e.Body
+	if strings.TrimSpace(text) == "" && e.HTMLBody != "" {
+		text = core.HTMLToText(e.HTMLBody)
+	}
+	// 纯文本：抬头与正文在同一个原生滚动视图里
+	ui.Scroll(c).Grow(1).Children(func() {
+		a.nativeHeader(c, e)
+		ui.Column(c).Padding(4, 28, 28).Gap(12).Children(func() {
+			for _, p := range strings.Split(strings.TrimSpace(text), "\n\n") {
+				ui.Text(c, p).LineHeight(1.6).Selectable()
+			}
+		})
+	})
+}
+
+// nativeHeader 是纯文本正文的原生抬头。
+func (a *App) nativeHeader(c *ui.Context, e *core.Email) {
+	t := c.Theme()
 	ui.Column(c).Padding(20, 28, 12).Gap(8).Children(func() {
 		ui.Text(c, nonEmpty(e.Subject, "（无主题）")).FontSize(22).Bold().Selectable()
 		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
@@ -391,32 +419,39 @@ func (a *App) detail(c *ui.Context, e *core.Email) {
 			})
 		}
 	})
-	if e.HTMLBody != "" && a.body != nil && !a.bodyFailed[e.ID] {
-		th := BodyThemeFor(a.dark)
-		doc, remote := MailDocument(e.HTMLBody, th)
-		if a.body.Show(e.ID+"|"+th.Bg, doc, th.Bg) {
-			if remote {
-				ui.Row(c).Padding(0, 28, 6).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Icon(c, icon("shield")).FontSize(12).TextColor(t.TextMuted)
-					ui.Text(c, "已阻止远程图片").FontSize(12).TextColor(t.TextMuted)
-				})
+}
+
+// headerInfo 是 HTML 文档里的抬头内容（与 nativeHeader 一致）。
+func (a *App) headerInfo(e *core.Email) MailHeader {
+	h := MailHeader{Subject: nonEmpty(e.Subject, "（无主题）"), FromName: e.From.Name, FromEmail: e.From.Email,
+		Summary: e.AISummary, Why: e.AIWhy}
+	var to []string
+	for _, x := range e.To {
+		to = append(to, x.Email)
+	}
+	h.Recipients = "收件人：" + strings.Join(to, ", ")
+	if len(e.CC) > 0 {
+		var cc []string
+		for _, x := range e.CC {
+			cc = append(cc, x.Email)
+		}
+		h.Recipients += "  抄送：" + strings.Join(cc, ", ")
+	}
+	if d, err := time.Parse(time.RFC3339, e.Date); err == nil {
+		h.Date = d.Local().Format("2006年1月2日 15:04")
+	}
+	if e.AISummary != "" {
+		h.SummaryTitle = "AI 摘要"
+		for _, k := range Categories {
+			if k.ID == e.Category {
+				h.SummaryTitle += " · " + k.Label
 			}
-			// 无边框、无圆角：正文与阅读区融为一体，背景色与阅读区一致
-			ui.WebView(c, a.body.Native()).Grow(1)
-			return
 		}
 	}
-	text := e.Body
-	if strings.TrimSpace(text) == "" && e.HTMLBody != "" {
-		text = core.HTMLToText(e.HTMLBody)
+	for _, at := range e.Attachments {
+		h.Attachments = append(h.Attachments, at.Name+"  "+formatSize(at.SizeKB))
 	}
-	ui.Scroll(c).Grow(1).Children(func() {
-		ui.Column(c).Padding(4, 28, 28).Gap(12).Children(func() {
-			for _, p := range strings.Split(strings.TrimSpace(text), "\n\n") {
-				ui.Text(c, p).LineHeight(1.6).Selectable()
-			}
-		})
-	})
+	return h
 }
 
 func formatSize(kb int) string {

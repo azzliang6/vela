@@ -301,7 +301,7 @@ func TestRules(t *testing.T) {
 }
 
 func TestMailDocumentThemeAndCSP(t *testing.T) {
-	doc, remote := MailDocument(`<div style="color:red">x</div><img src="https://t.example/p.gif"><script>alert(1)</script>`, BodyThemeFor(true))
+	doc, remote := MailDocument(`<div style="color:red">x</div><img src="https://t.example/p.gif"><script>alert(1)</script>`, BodyThemeFor(velaTheme(true)), MailHeader{Subject: "主题<b>"})
 	for _, want := range []string{"style-src 'unsafe-inline'", "script-src 'none'", "img-src data: cid:", "#141210", "#eae3d4", "#f2611d", `style="color:red"`} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("文档缺少 %q", want)
@@ -313,7 +313,7 @@ func TestMailDocumentThemeAndCSP(t *testing.T) {
 	if !remote {
 		t.Error("应识别出远程图片")
 	}
-	light, remote2 := MailDocument("<p>x</p>", BodyThemeFor(false))
+	light, remote2 := MailDocument("<p>x</p>", BodyThemeFor(velaTheme(false)), MailHeader{})
 	if !strings.Contains(light, "#f7f4ea") || remote2 {
 		t.Error("浅色主题背景不对或误报远程图片")
 	}
@@ -344,5 +344,49 @@ func TestHTMLBodyFallsBackToText(t *testing.T) {
 	tt.Frame()
 	if !tt.HasText("HTML 正文段落") {
 		t.Fatal("标记失败后应显示纯文本")
+	}
+}
+
+// 正文底色必须与阅读区实际使用的主题色完全相同（浅色、深色都检查）。
+func TestBodyColorsMatchPaneToken(t *testing.T) {
+	for _, dark := range []bool{false, true} {
+		th := velaTheme(dark)
+		bt := BodyThemeFor(th)
+		pane := cssColor(th.Background)
+		if bt.Bg != pane {
+			t.Fatalf("dark=%v 正文底色 %s ≠ 阅读区 %s", dark, bt.Bg, pane)
+		}
+		doc, _ := MailDocument("<p>x</p>", bt, MailHeader{Subject: "S"})
+		for _, want := range []string{"background:" + pane + "!important", "margin:0!important", "scrollbar-color:" + cssColor(th.Scrollbar) + " transparent", "::-webkit-scrollbar-track"} {
+			if !strings.Contains(doc, want) {
+				t.Errorf("dark=%v 文档缺少 %q", dark, want)
+			}
+		}
+		if !strings.Contains(WebViewBackground(), pane) {
+			t.Errorf("WebView 默认底色 %s 不含 %s", WebViewBackground(), pane)
+		}
+	}
+}
+
+type recBody struct{ bg, doc string }
+
+func (b *recBody) Show(_, doc, bg string) bool { b.bg, b.doc = bg, doc; return false }
+func (b *recBody) Native() ui.NativeWebView    { return nil }
+
+// 界面交给 WebView 的底色就是这一帧阅读区的底色，抬头也在文档里（与正文一起滚动）。
+func TestViewPassesPaneColorAndHeader(t *testing.T) {
+	for _, theme := range []string{"light", "dark"} {
+		a, f := newTestApp()
+		a.settings.Theme = theme
+		f.emails[1].HTMLBody = "<p>正文</p>"
+		a.emails, _ = f.GetEmails()
+		rb := &recBody{}
+		a.body = rb
+		tt := ui.NewTester(a.View, 1280, 820)
+		_ = tt.Click("信用卡账单")
+		want := cssColor(velaTheme(theme == "dark").Background)
+		if rb.bg != want || !strings.Contains(rb.doc, "<h1>信用卡账单</h1>") || !strings.Contains(rb.doc, "bank@x.com") {
+			t.Fatalf("%s: bg=%s want %s；抬头未进入文档", theme, rb.bg, want)
+		}
 	}
 }

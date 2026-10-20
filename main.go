@@ -103,7 +103,7 @@ func main() {
 
 		body := &webBody{post: win.Update, timeout: 8 * time.Second}
 		body.onFail = func(id string) { a.MarkBodyFailed(id); win.Invalidate() }
-		if wv, err := win.NewWebView(mygo.WebViewOptions{BackgroundColor: "light-dark(#f7f4ea, #141210)"}); err == nil {
+		if wv, err := win.NewWebView(mygo.WebViewOptions{BackgroundColor: app.WebViewBackground()}); err == nil {
 			body.wv, body.page, body.setBg = wv, wv.Page(), wv.SetBackgroundColor
 			wv.Page().OnDOMReady(func() { body.loaded = true })
 			wv.Page().OnDidFinishLoad(func() { body.loaded = true })
