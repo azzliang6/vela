@@ -76,8 +76,8 @@ func TestLocalDBRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := Email{ID: "a@b.com:inbox:1", AccountID: "a@b.com", Folder: "inbox", From: Contact{"张三", "z@x.com"},
-		To: []Contact{{"我", "a@b.com"}}, Subject: "主题", Body: "正文\x00带nul", Date: "2026-09-19T10:00:00+08:00",
+	e := Email{ID: "a@b.com:inbox:1", AccountID: "a@b.com", Folder: "inbox", From: Contact{Name: "张三", Email: "z@x.com"},
+		To: []Contact{{Name: "我", Email: "a@b.com"}}, Subject: "主题", Body: "正文\x00带nul", Date: "2026-09-19T10:00:00+08:00",
 		Starred: true, UID: 1, Real: true, RemoteName: "INBOX"}
 	if err := db.UpsertEmails([]Email{e}); err != nil {
 		t.Fatal(err)
