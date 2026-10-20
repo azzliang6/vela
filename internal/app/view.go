@@ -122,7 +122,7 @@ func folderIcon(id string) string {
 func (a *App) navItem(c *ui.Context, id, label, ic string, count int) {
 	t := c.Theme()
 	on := a.folder == id
-	row := ui.Row(c.Key("nav-" + id)).Gap(10).AlignItems(ui.Center).Padding(7, 10).Radius(t.Radius).Role(ui.RoleButton).Label(label)
+	row := ui.Row(c.Key("nav-"+id)).Gap(10).AlignItems(ui.Center).Padding(7, 10).Radius(t.Radius).Role(ui.RoleButton).Label(label)
 	row.Children(func() {
 		ui.Icon(c, icon(ic)).FontSize(16)
 		ui.Text(c, label).Grow(1)
@@ -585,7 +585,10 @@ func (a *App) paletteView(c *ui.Context) {
 	dialogEnter(c, box)
 	box.Children(func() {
 		in := ui.SearchField(c, &a.paletteQ).Placeholder("搜索邮件，或输入命令：写邮件 / 同步 / 设置").Label("搜索邮件").AutoFocus()
-		cmds := []struct{ label string; run func() }{
+		cmds := []struct {
+			label string
+			run   func()
+		}{
 			{"写邮件", func() { a.StartCompose("new") }},
 			{"立即同步", a.Sync},
 			{"添加邮箱", func() { a.addOpen = true }},

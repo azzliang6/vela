@@ -109,8 +109,8 @@ func (s *session) resolve(kind FolderKind) string {
 }
 
 type uidMeta struct {
-	uid             uint32
-	seen, flagged   bool
+	uid           uint32
+	seen, flagged bool
 }
 
 func hasFlag(flags []imap.Flag, want imap.Flag) bool {

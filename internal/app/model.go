@@ -55,7 +55,7 @@ var Categories = []Folder{
 
 // Settings 是持久化的偏好（原来放在 localStorage）。
 type Settings struct {
-	Theme         string `json:"theme"` // system / light / dark
+	Theme         string `json:"theme"`   // system / light / dark
 	Density       string `json:"density"` // cozy / compact
 	SyncMinutes   int    `json:"syncMinutes"`
 	Notifications bool   `json:"notifications"`
@@ -111,22 +111,22 @@ type App struct {
 	settings     Settings
 	settingsPath string
 
-	compose     *Compose
-	composeOpen bool
-	add         AddForm
-	addOpen     bool
+	compose      *Compose
+	composeOpen  bool
+	add          AddForm
+	addOpen      bool
 	settingsOpen bool
-	searchOpen  bool
-	paletteQ    string
+	searchOpen   bool
+	paletteQ     string
 
-	syncing    bool
-	syncedAt   time.Time
-	aiLoading  string
-	fresh      map[string]time.Time // 新到邮件 → 到达时间（短暂高亮）
+	syncing        bool
+	syncedAt       time.Time
+	aiLoading      string
+	fresh          map[string]time.Time // 新到邮件 → 到达时间（短暂高亮）
 	providerLabels []string
 
-	listSel  int
-	toasts   []string
+	listSel int
+	toasts  []string
 
 	// post 把后台结果送回主线程；async 为 false 时同步执行（测试用）。
 	post  func(func())

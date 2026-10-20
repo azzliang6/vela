@@ -38,7 +38,7 @@ func (f *fakeBackend) AddAccount(in core.AddAccountInput) (core.MailboxAccount, 
 	return a, nil
 }
 func (f *fakeBackend) ListAccounts() ([]core.MailboxAccount, error) { return f.accounts, nil }
-func (f *fakeBackend) RemoveAccount(string) error                  { return nil }
+func (f *fakeBackend) RemoveAccount(string) error                   { return nil }
 func (f *fakeBackend) SyncAccount(id string) (core.SyncOutcome, error) {
 	if o, ok := f.sync[id]; ok {
 		return o, nil
@@ -61,9 +61,9 @@ func (f *fakeBackend) Send(in core.SendInput) (string, error) {
 	f.sent = append(f.sent, in)
 	return "已投递", nil
 }
-func (f *fakeBackend) GetEmails() ([]core.Email, error)    { return f.emails, nil }
-func (f *fakeBackend) SyncEmails(e []core.Email) error     { f.saved += len(e); return nil }
-func (f *fakeBackend) DeleteEmails([]string) error         { return nil }
+func (f *fakeBackend) GetEmails() ([]core.Email, error) { return f.emails, nil }
+func (f *fakeBackend) SyncEmails(e []core.Email) error  { f.saved += len(e); return nil }
+func (f *fakeBackend) DeleteEmails([]string) error      { return nil }
 func (f *fakeBackend) AIChat(core.AIChatInput) (string, error) {
 	return "```json\n{\"category\":\"finance\",\"summary\":\"信用卡账单 ¥1,234 待还\",\"why\":\"\"}\n```", nil
 }

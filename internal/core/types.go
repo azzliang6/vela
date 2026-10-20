@@ -75,7 +75,7 @@ func ParseEmailID(id string) (account, folder string, uid uint32, ok bool) {
 
 // MailboxCursor 是增量同步游标，JSON 形状与 Rust 版一致（存在 mailbox_accounts.cursors）。
 type MailboxCursor struct {
-	Folder string `json:"folder"` // inbox / sent
+	Folder  string `json:"folder"` // inbox / sent
 	LastUID uint32 `json:"lastUid"`
 	// BackfillUID：nil = 尚未开始回填，0 = 已完成，n = 还需拉取 uid <= n
 	BackfillUID *uint32 `json:"backfillUid"`
