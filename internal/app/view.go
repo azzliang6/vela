@@ -391,14 +391,28 @@ func (a *App) detail(c *ui.Context, e *core.Email) {
 			})
 		}
 	})
-	if e.HTMLBody != "" && a.body != nil {
-		a.body.Show(e.ID, e.HTMLBody)
-		ui.WebView(c, a.body.Native()).Grow(1).Margin(0, 16, 16).Radius(t.Radius).Border(1, t.Border)
-		return
+	if e.HTMLBody != "" && a.body != nil && !a.bodyFailed[e.ID] {
+		th := BodyThemeFor(a.dark)
+		doc, remote := MailDocument(e.HTMLBody, th)
+		if a.body.Show(e.ID+"|"+th.Bg, doc, th.Bg) {
+			if remote {
+				ui.Row(c).Padding(0, 28, 6).Gap(6).AlignItems(ui.Center).Children(func() {
+					ui.Icon(c, icon("shield")).FontSize(12).TextColor(t.TextMuted)
+					ui.Text(c, "已阻止远程图片").FontSize(12).TextColor(t.TextMuted)
+				})
+			}
+			// 无边框、无圆角：正文与阅读区融为一体，背景色与阅读区一致
+			ui.WebView(c, a.body.Native()).Grow(1)
+			return
+		}
+	}
+	text := e.Body
+	if strings.TrimSpace(text) == "" && e.HTMLBody != "" {
+		text = core.HTMLToText(e.HTMLBody)
 	}
 	ui.Scroll(c).Grow(1).Children(func() {
 		ui.Column(c).Padding(4, 28, 28).Gap(12).Children(func() {
-			for _, p := range strings.Split(strings.TrimSpace(e.Body), "\n\n") {
+			for _, p := range strings.Split(strings.TrimSpace(text), "\n\n") {
 				ui.Text(c, p).LineHeight(1.6).Selectable()
 			}
 		})

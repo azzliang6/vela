@@ -13,6 +13,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/azzliang6/vela/internal/app"
 	"github.com/azzliang6/vela/internal/core"
@@ -24,18 +25,54 @@ import (
 var trayIcon []byte
 
 // webBody 是显示 HTML 正文的 WebView。
+//
+// Windows（WebView2）上正文空白的根因：之前用 LoadHTML(doc, "about:blank")。
+// MyGo 的 Windows 后端在 baseURL 非空时不调 NavigateToString，而是先 Navigate 到
+// baseURL，再靠 WebResourceRequested 过滤器把文档“回答”给那次请求；about:blank
+// 不经过 WebResourceRequested，于是加载出来的永远是空白页。现在 baseURL 传空，
+// 直接走 NavigateToString。另外加载失败、超时或文档过大时，回退为原生纯文本。
 type webBody struct {
-	wv   *mygo.WebView
-	last string
-	dark func() bool
+	wv      *mygo.WebView
+	page    htmlLoader // wv.Page()；测试时替换
+	setBg   func(string) error
+	last    string // 当前文档的 key（邮件 id + 主题）
+	gen     int
+	loaded  bool
+	post    func(func())
+	onFail  func(id string)
+	timeout time.Duration
 }
 
-func (b *webBody) Show(id, html string) {
-	if b.wv == nil || b.last == id {
-		return
+func (b *webBody) Show(key, doc, bg string) bool {
+	if b.page == nil || len(doc) > app.MaxDocBytes {
+		return false
 	}
-	b.last = id
-	b.wv.Page().LoadHTML(app.SanitizeMailHTML(html, b.dark()), "about:blank")
+	if b.last == key {
+		return true
+	}
+	b.last, b.loaded = key, false
+	b.gen++
+	gen := b.gen
+	id, _, _ := strings.Cut(key, "|")
+	_ = b.setBg(bg)          // 与阅读区同色，避免白屏/黑屏闪烁
+	b.page.LoadHTML(doc, "") // baseURL 必须为空，见上面的说明
+	time.AfterFunc(b.timeout, func() {
+		b.post(func() {
+			if b.gen == gen && !b.loaded {
+				b.fail(id)
+			}
+		})
+	})
+	return true
+}
+
+// htmlLoader 是 *mygo.Page 中正文用到的部分。
+type htmlLoader interface{ LoadHTML(html, baseURL string) }
+
+func (b *webBody) fail(id string) {
+	log.Printf("[vela] 邮件 %s 的 HTML 正文未能在 WebView 中显示，改用纯文本", id)
+	b.last = ""
+	b.onFail(id)
 }
 
 func (b *webBody) Native() ui.NativeWebView { return b.wv }
@@ -64,9 +101,13 @@ func main() {
 			}
 		})
 
-		body := &webBody{dark: a.Dark}
-		if wv, err := win.NewWebView(mygo.WebViewOptions{BackgroundColor: "light-dark(#ffffff, #1b1815)"}); err == nil {
-			body.wv = wv
+		body := &webBody{post: win.Update, timeout: 8 * time.Second}
+		body.onFail = func(id string) { a.MarkBodyFailed(id); win.Invalidate() }
+		if wv, err := win.NewWebView(mygo.WebViewOptions{BackgroundColor: "light-dark(#f7f4ea, #141210)"}); err == nil {
+			body.wv, body.page, body.setBg = wv, wv.Page(), wv.SetBackgroundColor
+			wv.Page().OnDOMReady(func() { body.loaded = true })
+			wv.Page().OnDidFinishLoad(func() { body.loaded = true })
+			// 不监听 OnDidFailLoad：切换邮件时被取消的旧导航也会报失败；用超时判断即可。
 			// 正文里的链接不在内嵌页面里跳转，改用系统浏览器打开
 			wv.Page().OnWillNavigate(func(ev *mygo.NavigateEvent) {
 				if strings.HasPrefix(ev.URL, "about:") {

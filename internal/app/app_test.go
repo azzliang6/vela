@@ -299,3 +299,50 @@ func TestRules(t *testing.T) {
 		t.Fatal(r)
 	}
 }
+
+func TestMailDocumentThemeAndCSP(t *testing.T) {
+	doc, remote := MailDocument(`<div style="color:red">x</div><img src="https://t.example/p.gif"><script>alert(1)</script>`, BodyThemeFor(true))
+	for _, want := range []string{"style-src 'unsafe-inline'", "script-src 'none'", "img-src data: cid:", "#141210", "#eae3d4", "#f2611d", `style="color:red"`} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("文档缺少 %q", want)
+		}
+	}
+	if strings.Contains(doc, "<script") || strings.Contains(MailCSP, "img-src *") {
+		t.Error("脚本或远程图片未被阻止")
+	}
+	if !remote {
+		t.Error("应识别出远程图片")
+	}
+	light, remote2 := MailDocument("<p>x</p>", BodyThemeFor(false))
+	if !strings.Contains(light, "#f7f4ea") || remote2 {
+		t.Error("浅色主题背景不对或误报远程图片")
+	}
+}
+
+type failBody struct{ shows int }
+
+func (b *failBody) Show(string, string, string) bool { b.shows++; return false }
+func (b *failBody) Native() ui.NativeWebView         { return nil }
+
+// WebView 无法显示（或加载失败）时，正文用原生纯文本显示，不能是空白。
+func TestHTMLBodyFallsBackToText(t *testing.T) {
+	a, f := newTestApp()
+	f.emails[1].HTMLBody = "<p>HTML 正文段落</p>"
+	f.emails[1].Body = ""
+	a.emails, _ = f.GetEmails()
+	fb := &failBody{}
+	a.body = fb
+	tt := ui.NewTester(a.View, 1280, 820)
+	if err := tt.Click("信用卡账单"); err != nil {
+		t.Fatal(err)
+	}
+	if fb.shows == 0 || !tt.HasText("HTML 正文段落") {
+		t.Fatalf("应回退为纯文本：%q", tt.Texts())
+	}
+	a.body = nil
+	a.MarkBodyFailed(a.selected)
+	tt.Frame()
+	if !tt.HasText("HTML 正文段落") {
+		t.Fatal("标记失败后应显示纯文本")
+	}
+}

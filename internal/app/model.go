@@ -134,9 +134,18 @@ type App struct {
 	// notify 弹系统通知（生产环境由 main 注入）。
 	notify func(title, body string)
 	// body 显示 HTML 正文（生产环境是 WebView）。
-	body BodyView
-	now  func() time.Time
-	dark bool
+	body       BodyView
+	bodyFailed map[string]bool // HTML 正文加载失败的邮件 → 改用纯文本
+	now        func() time.Time
+	dark       bool
+}
+
+// MarkBodyFailed 记录某封邮件的 HTML 正文在 WebView 中加载失败或超时，之后改用纯文本显示。
+func (a *App) MarkBodyFailed(id string) {
+	if a.bodyFailed == nil {
+		a.bodyFailed = map[string]bool{}
+	}
+	a.bodyFailed[id] = true
 }
 
 // Dark 表示上一帧是否用了深色主题（WebView 正文跟随）。
@@ -144,8 +153,9 @@ func (a *App) Dark() bool { return a.dark }
 
 // BodyView 是 HTML 正文的显示器。
 type BodyView interface {
-	// Show 加载一封邮件的 HTML 正文；同一封邮件重复调用不会重新加载。
-	Show(id, html string)
+	// Show 加载一封邮件的 HTML 正文（doc 是 MailDocument 生成的完整文档）；
+	// 同一 key 重复调用不会重新加载。返回 false 表示无法显示，界面改用纯文本。
+	Show(key, doc string, bg string) bool
 	// Native 返回要嵌进界面的 WebView。
 	Native() ui.NativeWebView
 }
@@ -298,9 +308,6 @@ func (a *App) Select(id string) {
 		return
 	}
 	a.selected = id
-	if a.body != nil && e.HTMLBody != "" {
-		a.body.Show(e.ID, e.HTMLBody)
-	}
 	if !e.Read {
 		e.Read = true
 		a.persist(*e)
