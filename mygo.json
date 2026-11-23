@@ -1,7 +1,7 @@
 {
 	"name": "Vela",
 	"identifier": "app.vela.mail",
-	"version": "0.4.2",
+	"version": "0.4.3",
 	"icon": "resources/icon.png",
 	"out": "build",
 	"updates": {
