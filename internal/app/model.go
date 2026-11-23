@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +32,7 @@ type Mailer interface {
 	GetEmails() ([]core.Email, error)
 	SyncEmails(e []core.Email) error
 	DeleteEmails(ids []string) error
+	EmailHTML(id string) (string, error) // 按需读取 HTML 正文（列表里的邮件不带）
 	AIChat(in core.AIChatInput) (string, error)
 }
 
@@ -139,6 +139,11 @@ type App struct {
 
 	listSel int
 	toasts  []string
+
+	rev     int       // 邮件列表内容变化时递增（persist / 删除 / 整体重载），过滤缓存据此失效
+	visMemo visMemo   // Visible 的结果缓存：同一帧内、两次输入之间不重复扫描全部邮件
+	docMemo docMemo   // 当前 HTML 正文生成好的文档：清洗 HTML 很贵，不每帧重做
+	html    htmlCache // 按需加载的 HTML 正文
 
 	// post 把后台结果送回主线程；async 为 false 时同步执行（测试用）。
 	post  func(func())
@@ -257,6 +262,7 @@ func (a *App) persist(changed ...core.Email) {
 	if len(changed) == 0 {
 		return
 	}
+	a.rev++
 	cp := slices.Clone(changed)
 	a.run(func() func() {
 		if err := a.be.SyncEmails(cp); err != nil {
@@ -277,9 +283,50 @@ func (a *App) find(id string) (int, *core.Email) {
 	return -1, nil
 }
 
+// visMemo 记住上一次 Visible 的条件与结果。
+type visMemo struct {
+	rev             int
+	n               int
+	first           *core.Email
+	folder, account string
+	query           string
+	out             []*core.Email
+}
+
 // Visible 返回当前文件夹 / 账户 / 搜索条件下的邮件，按时间倒序。
+// 每帧都会调用：条件与邮件都没变时直接返回上次的结果；搜索词只是在上次基础上
+// 多打了几个字时，只在上次的命中里继续筛。
 func (a *App) Visible() []*core.Email {
 	q := strings.ToLower(strings.TrimSpace(a.query))
+	var first *core.Email
+	if len(a.emails) > 0 {
+		first = &a.emails[0]
+	}
+	m := &a.visMemo
+	same := m.out != nil && m.rev == a.rev && m.n == len(a.emails) && m.first == first &&
+		m.folder == a.folder && m.account == a.account
+	if same && m.query == q {
+		return m.out
+	}
+	var out []*core.Email
+	if same && m.query != "" && strings.Contains(q, m.query) {
+		// 搜索词变长：结果只会是上次命中的子集，顺序也已排好
+		for _, e := range m.out {
+			if matches(e, q) {
+				out = append(out, e)
+			}
+		}
+	} else {
+		out = a.filter(q)
+	}
+	if out == nil {
+		out = []*core.Email{}
+	}
+	*m = visMemo{rev: a.rev, n: len(a.emails), first: first, folder: a.folder, account: a.account, query: q, out: out}
+	return out
+}
+
+func (a *App) filter(q string) []*core.Email {
 	var out []*core.Email
 	for i := range a.emails {
 		e := &a.emails[i]
@@ -305,13 +352,17 @@ func (a *App) Visible() []*core.Email {
 		}
 		out = append(out, e)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Date > out[j].Date })
+	byDate := func(x, y *core.Email) int { return strings.Compare(y.Date, x.Date) }
+	if !slices.IsSortedFunc(out, byDate) { // 本地库按时间倒序读出，通常已经有序
+		slices.SortStableFunc(out, byDate)
+	}
 	return out
 }
 
+// matches 判断邮件是否包含搜索词 q（q 已转小写）。逐字段比较、不拼接也不复制正文。
 func matches(e *core.Email, q string) bool {
-	hay := strings.ToLower(e.Subject + "\n" + e.From.Name + "\n" + e.From.Email + "\n" + e.Body)
-	return strings.Contains(hay, q)
+	return containsFold(e.Subject, q) || containsFold(e.From.Name, q) ||
+		containsFold(e.From.Email, q) || containsFold(e.Body, q)
 }
 
 // Unread 统计某文件夹未读数。
@@ -396,6 +447,7 @@ func (a *App) Move(id, folder string) {
 	}
 	if folder == "trash" && e.Folder == "trash" { // 垃圾箱里再删 = 彻底删除本地副本
 		a.emails = slices.Delete(a.emails, i, i+1)
+		a.rev++
 		a.selected = ""
 		a.run(func() func() { _ = a.be.DeleteEmails([]string{id}); return nil })
 		a.toast("已彻底删除")
@@ -434,14 +486,11 @@ func (a *App) Sync() {
 	accs := slices.Clone(a.accounts)
 	gen := a.dataGen
 	a.run(func() func() {
-		var outs []core.SyncOutcome
-		for _, acc := range accs {
-			o, err := a.be.SyncAccount(acc.ID)
-			if err != nil {
-				o = core.SyncOutcome{AccountID: acc.ID, Err: err}
-			}
-			outs = append(outs, o)
+		ids := make([]string, len(accs))
+		for i, acc := range accs {
+			ids[i] = acc.ID
 		}
+		outs := core.SyncEach(ids, a.be.SyncAccount) // 各账户并行同步
 		return func() {
 			if gen != a.dataGen {
 				// 还原备份已经把数据整体换掉：这次同步针对的是旧数据，结果不能合并回来
@@ -505,21 +554,35 @@ func (a *App) merge(in []core.Email) []core.Email {
 		}
 	}
 	if len(fresh) > 0 {
+		a.persist(fresh...) // 先带着 HTML 写入本地库，内存里只留标记
+		for i := range fresh {
+			a.stripHTML(&fresh[i])
+		}
 		a.emails = append(fresh, a.emails...)
-		a.persist(fresh...)
 	}
 	return fresh
 }
 
 // prune 移除「服务器上已删除 / 归档」的本地陈旧副本（只动 inbox / sent 里的真实邮件）。
 func (a *App) prune(account string, present []core.FolderUIDs) {
+	if len(present) == 0 {
+		return
+	}
+	// 每个文件夹的 UID 建成集合：邮件与 UID 都上万时，逐个线性查找会卡住界面
+	sets := make([]map[uint32]struct{}, len(present))
+	for i, p := range present {
+		sets[i] = make(map[uint32]struct{}, len(p.UIDs))
+		for _, u := range p.UIDs {
+			sets[i][u] = struct{}{}
+		}
+	}
 	var gone []string
 	keep := a.emails[:0]
 	for _, e := range a.emails {
 		drop := false
 		if e.Real && e.AccountID == account {
-			for _, p := range present {
-				if p.Folder == e.Folder && !slices.Contains(p.UIDs, e.UID) {
+			for i, p := range present {
+				if _, ok := sets[i][e.UID]; p.Folder == e.Folder && !ok {
 					drop = true
 				}
 			}
@@ -532,6 +595,7 @@ func (a *App) prune(account string, present []core.FolderUIDs) {
 	}
 	a.emails = keep
 	if len(gone) > 0 {
+		a.rev++
 		a.run(func() func() { _ = a.be.DeleteEmails(gone); return nil })
 	}
 }

@@ -142,8 +142,11 @@ func (a *App) afterRestore(res *core.RestoreResult, err error) {
 
 	// 本机数据已经被整体换掉：还原之前发起的同步针对的是旧数据，结果不能再合并回来
 	a.dataGen++
+	a.html.reset()
+	a.docMemo = docMemo{}
 	a.accounts, _ = a.be.ListAccounts()
 	a.emails, _ = a.be.GetEmails()
+	a.rev++
 	a.selected = ""
 	if !slices.ContainsFunc(a.accounts, func(x core.MailboxAccount) bool { return x.ID == a.account }) {
 		a.account = "" // 正在筛选的账户已被覆盖掉：回到「全部账户」，否则列表会是空的

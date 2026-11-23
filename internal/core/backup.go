@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/pbkdf2"
@@ -10,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,10 +25,10 @@ import (
 // 文件格式：
 //
 //	偏移 0..6   magic "VELABAK"
-//	偏移 7      格式版本（当前 1）
+//	偏移 7      格式版本（当前 2；1 为未压缩的旧格式，仍可读取）
 //	偏移 8..23  PBKDF2 盐（16 字节随机）
 //	偏移 24..35 AES-GCM nonce（12 字节随机）
-//	偏移 36..   AES-256-GCM 密文（内容为 JSON 信封）
+//	偏移 36..   AES-256-GCM 密文（内容为 gzip 压缩的 JSON 信封；版本 1 未压缩）
 //
 // 口令经 PBKDF2-HMAC-SHA256（60 万次迭代）派生密钥。信封里带有 mail.key 的
 // 密钥材料——授权码本身在数据库里是密文，整包再加密一层，因此备份文件
@@ -37,7 +39,10 @@ import (
 // 会给本机当前数据留一份副本（见 DB.SnapshotBeforeRestore）。
 const (
 	backupMagic   = "VELABAK"
-	backupVersion = 1
+	backupVersion = 2 // 写出的格式版本
+	backupV1      = 1 // 未压缩的旧格式
+	// backupMaxJSON 是解压后 JSON 信封的上限，防止被构造的文件解压成天文数字
+	backupMaxJSON = 4 << 30
 	backupSaltLen = 16
 	backupKeyLen  = 32
 )
@@ -248,8 +253,22 @@ func deriveBackupKey(passphrase string, salt []byte) ([]byte, error) {
 	return pbkdf2.Key(sha256.New, passphrase, salt, backupKDFIters, backupKeyLen)
 }
 
-// sealBackup 把 JSON 信封按文件格式加密封装。
+// sealBackup 把 JSON 信封压缩后按文件格式加密封装。邮件正文压缩率很高，
+// 备份文件通常只有原来的几分之一。必须先压缩再加密：密文无法再压缩。
 func sealBackup(payload []byte, passphrase string) ([]byte, error) {
+	var zbuf bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&zbuf, gzip.BestCompression)
+	if _, err := zw.Write(payload); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return sealBackupRaw(zbuf.Bytes(), passphrase, backupVersion)
+}
+
+// sealBackupRaw 按指定格式版本加密封装 payload（版本 1 为未压缩的 JSON）。
+func sealBackupRaw(payload []byte, passphrase string, version byte) ([]byte, error) {
 	salt := make([]byte, backupSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
@@ -272,7 +291,7 @@ func sealBackup(payload []byte, passphrase string) ([]byte, error) {
 	}
 	out := make([]byte, 0, len(backupMagic)+1+backupSaltLen+gcm.NonceSize()+len(payload)+gcm.Overhead())
 	out = append(out, backupMagic...)
-	out = append(out, byte(backupVersion))
+	out = append(out, version)
 	out = append(out, salt...)
 	out = append(out, nonce...)
 	return gcm.Seal(out, nonce, payload, nil), nil
@@ -286,8 +305,9 @@ func openBackup(data []byte, passphrase string) ([]byte, error) {
 	if !bytes.Equal(data[:len(backupMagic)], []byte(backupMagic)) {
 		return nil, errors.New("不是有效的 Vela 备份文件")
 	}
-	if v := data[len(backupMagic)]; v != backupVersion {
-		return nil, fmt.Errorf("备份格式版本 %d 无法读取（当前支持 %d）", v, backupVersion)
+	version := data[len(backupMagic)]
+	if version != backupVersion && version != backupV1 {
+		return nil, fmt.Errorf("备份格式版本 %d 无法读取（请升级 Vela）", version)
 	}
 	salt := data[len(backupMagic)+1 : len(backupMagic)+1+backupSaltLen]
 	rest := data[len(backupMagic)+1+backupSaltLen:]
@@ -310,7 +330,21 @@ func openBackup(data []byte, passphrase string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("密码错误或备份文件已损坏")
 	}
-	return payload, nil
+	if version == backupV1 {
+		return payload, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return nil, errors.New("备份文件已损坏（无法解压）")
+	}
+	out, err := io.ReadAll(io.LimitReader(zr, backupMaxJSON+1))
+	if err != nil {
+		return nil, errors.New("备份文件已损坏（无法解压）")
+	}
+	if len(out) > backupMaxJSON {
+		return nil, errors.New("备份文件内容过大，无法还原")
+	}
+	return out, nil
 }
 
 /* ———— 对界面暴露的能力 ———— */

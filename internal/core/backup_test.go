@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -460,4 +461,44 @@ func TestRestoreReconnectsWatcher(t *testing.T) {
 	}
 	// 还原之后监控立刻换成备份里的账户：新的开始监控，被覆盖的旧账户断开
 	waitRunning(t, w, map[string]bool{"new@x": true})
+}
+
+// 新备份压缩后明显变小；旧版（版本 1，未压缩）的备份文件仍能还原。
+func TestBackupCompressedAndReadsV1(t *testing.T) {
+	src := backupTestEnv(t, "src", "")
+	body := strings.Repeat("这是一封很长的邮件正文，内容重复度很高。The quick brown fox. ", 400)
+	var ems []Email
+	for i := range 50 {
+		ems = append(ems, Email{ID: fmt.Sprintf("me@qq.com:inbox:%d", i+1), AccountID: "me@qq.com", Folder: "inbox",
+			Subject: "周报", Body: body, HTMLBody: "<p>" + body + "</p>", Date: "2026-10-01T10:00:00+08:00"})
+	}
+	if err := src.DB.UpsertEmails(ems); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.ExportBackup("口令1234", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[len(backupMagic)] != backupVersion {
+		t.Fatalf("应写出版本 %d", backupVersion)
+	}
+	raw, _ := openBackup(data, "口令1234")
+	if len(data)*5 > len(raw) {
+		t.Fatalf("压缩效果不明显：文件 %d 字节，内容 %d 字节", len(data), len(raw))
+	}
+
+	// 用同样的信封造一个旧格式文件
+	v1, err := sealBackupRaw(raw, "口令1234", backupV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := backupTestEnv(t, "dst", "")
+	res, err := dst.ImportBackup("口令1234", v1)
+	if err != nil || res.Emails != 50 {
+		t.Fatalf("旧格式应可还原：%v %+v", err, res)
+	}
+	got, _ := dst.DB.GetEmails()
+	if len(got) != 50 || got[0].HTMLBody == "" {
+		t.Fatalf("还原内容不完整：%d", len(got))
+	}
 }

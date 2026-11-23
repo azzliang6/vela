@@ -2,8 +2,11 @@ package core
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestCryptoRoundtrip(t *testing.T) {
@@ -187,5 +190,83 @@ func TestParseGBK(t *testing.T) {
 	}
 	if e.ID != "test@example.com:inbox:101" || e.MessageID != "m101@qq.com" {
 		t.Fatal(e.ID, e.MessageID)
+	}
+}
+
+// 界面列表不带 HTML 正文：按需读取，写回状态时库里的 HTML 不被清掉。
+func TestLazyHTMLBody(t *testing.T) {
+	db, _ := OpenDB(":memory:")
+	e := Email{ID: "a@b.com:inbox:1", AccountID: "a@b.com", Folder: "inbox", Subject: "s", Body: "纯文本",
+		HTMLBody: "<p>富文本</p>", Date: "2026-09-19T10:00:00+08:00"}
+	plain := Email{ID: "a@b.com:inbox:2", AccountID: "a@b.com", Folder: "inbox", Subject: "t", Body: "只有纯文本",
+		Date: "2026-09-18T10:00:00+08:00"}
+	if err := db.UpsertEmails([]Email{e, plain}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := db.ListEmails()
+	if err != nil || len(list) != 2 {
+		t.Fatalf("%v %d", err, len(list))
+	}
+	if list[0].HTMLBody != "" || !list[0].HasHTML || list[1].HasHTML {
+		t.Fatalf("列表不应带 HTML 但应标记 HasHTML：%+v", list)
+	}
+	if h, _ := db.EmailHTML(e.ID); h != "<p>富文本</p>" {
+		t.Fatalf("按需读取 HTML：%q", h)
+	}
+	if h, err := db.EmailHTML("nope"); h != "" || err != nil {
+		t.Fatalf("不存在的邮件：%q %v", h, err)
+	}
+
+	// 用列表里（不带 HTML）的副本写回已读状态
+	light := list[0]
+	light.Read = true
+	if err := db.UpsertEmails([]Email{light}); err != nil {
+		t.Fatal(err)
+	}
+	full, _ := db.GetEmails()
+	if !full[0].Read || full[0].HTMLBody != "<p>富文本</p>" {
+		t.Fatalf("写回状态后 HTML 应保留：%+v", full[0])
+	}
+	// 明确没有 HTML 的写入仍会清空
+	light.HasHTML = false
+	_ = db.UpsertEmails([]Email{light})
+	if h, _ := db.EmailHTML(e.ID); h != "" {
+		t.Fatalf("HasHTML=false 的写入应清空 HTML：%q", h)
+	}
+}
+
+// 多账户并行同步：总耗时接近最慢的一个；结果顺序与输入一致；失败不影响其它账户。
+func TestSyncEachParallel(t *testing.T) {
+	ids := []string{"a", "b", "c", "d", "e", "f"}
+	var mu sync.Mutex
+	running, peak := 0, 0
+	start := time.Now()
+	out := SyncEach(ids, func(id string) (SyncOutcome, error) {
+		mu.Lock()
+		running++
+		peak = max(peak, running)
+		mu.Unlock()
+		time.Sleep(60 * time.Millisecond)
+		mu.Lock()
+		running--
+		mu.Unlock()
+		if id == "c" {
+			return SyncOutcome{}, errors.New("连不上")
+		}
+		return SyncOutcome{AccountID: id}, nil
+	})
+	if el := time.Since(start); el > 250*time.Millisecond {
+		t.Fatalf("应并行执行，实际耗时 %v", el)
+	}
+	if peak > SyncParallel || peak < 2 {
+		t.Fatalf("并发数 %d 应在 2..%d 之间", peak, SyncParallel)
+	}
+	for i, o := range out {
+		if o.AccountID != ids[i] {
+			t.Fatalf("第 %d 个结果顺序不对：%q", i, o.AccountID)
+		}
+		if (o.Err != nil) != (ids[i] == "c") {
+			t.Fatalf("%s 的错误状态不对：%v", ids[i], o.Err)
+		}
 	}
 }

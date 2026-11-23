@@ -52,3 +52,4 @@ go tool mygo build -platform windows/amd64,linux/amd64   # 交叉打包（Window
 
 - 还原不会更换本机密钥：授权码先用备份里的密钥材料解开，再用本机密钥（`mail.key`，或 `VELA_SECRET`）重新加密后写入，所以用 `VELA_SECRET` 的环境重启之后照常可用。
 - 覆盖之前会把本机当前数据复制一份到数据目录下的 `snapshots/vela-before-restore-<时间>.db`，只保留最近 3 份。想撤销还原，退出 Vela 后用这份副本替换 `vela.db` 即可。
+- 备份文件先压缩再加密（格式版本 2），通常只有未压缩时的几分之一。新版本能还原旧版导出的备份；旧版本的 Vela 读不了新格式，请先升级。

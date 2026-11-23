@@ -507,7 +507,7 @@ func (a *App) mailRow(c *ui.Context, p palette, e *core.Email, hideSep bool) {
 					preview := e.AISummary
 					hasAI := preview != ""
 					if !hasAI {
-						preview = strings.Join(strings.Fields(e.Body), " ")
+						preview = previewText(e.Body)
 					}
 					if preview != "" {
 						ui.Text(c, preview).FontSize(12.5).LineHeight(1.42).TextColor(t.TextMuted).MaxLines(2).Ellipsis("…")
@@ -706,17 +706,22 @@ func (a *App) detail(c *ui.Context, p palette, e *core.Email, bar ui.TitleBar) {
 
 	// HTML 正文：抬头（主题、发件人、AI 摘要、附件）也渲染进同一个文档，
 	// 与正文一起滚动，WebView 直接铺满阅读区剩余部分，没有任何边框或内边距容器。
-	if e.HTMLBody != "" && a.body != nil && !a.bodyFailed[e.ID] {
+	htmlSrc, ready := a.htmlFor(e)
+	if !ready {
+		ui.Box(c).Grow(1) // 正在从本地库读取 HTML 正文（通常只要几毫秒），读完自动刷新
+		return
+	}
+	if htmlSrc != "" && a.body != nil && !a.bodyFailed[e.ID] {
 		th := BodyThemeFor(t)
-		doc, _ := MailDocument(e.HTMLBody, th, a.headerInfo(e))
-		if a.body.Show(e.ID+"|"+docKey(doc), doc, th.Bg) {
+		doc, key := a.mailDocument(e.ID, htmlSrc, th, a.headerInfo(e))
+		if a.body.Show(e.ID+"|"+key, doc, th.Bg) {
 			ui.WebView(c, a.body.Native()).Grow(1)
 			return
 		}
 	}
 	text := e.Body
-	if strings.TrimSpace(text) == "" && e.HTMLBody != "" {
-		text = core.HTMLToText(e.HTMLBody)
+	if strings.TrimSpace(text) == "" && htmlSrc != "" {
+		text = core.HTMLToText(htmlSrc)
 	}
 	// 纯文本：抬头与正文在同一个原生滚动视图里，保持舒适的书页行宽
 	ui.Scroll(c).Grow(1).Children(func() {

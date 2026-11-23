@@ -12,15 +12,16 @@ import (
 
 // fakeBackend 是内存里的后端，记录界面发起的调用。
 type fakeBackend struct {
-	accounts []core.MailboxAccount
-	emails   []core.Email
-	sync     map[string]core.SyncOutcome
-	sent     []core.SendInput
-	flags    []string
-	moved    []string
-	added    []core.AddAccountInput
-	addErr   error
-	saved    int
+	accounts  []core.MailboxAccount
+	emails    []core.Email
+	sync      map[string]core.SyncOutcome
+	sent      []core.SendInput
+	flags     []string
+	moved     []string
+	added     []core.AddAccountInput
+	addErr    error
+	saved     int
+	htmlReads int
 }
 
 func (f *fakeBackend) Providers() []core.ProviderPreset { return core.AllPresets() }
@@ -61,9 +62,27 @@ func (f *fakeBackend) Send(in core.SendInput) (string, error) {
 	f.sent = append(f.sent, in)
 	return "已投递", nil
 }
-func (f *fakeBackend) GetEmails() ([]core.Email, error) { return f.emails, nil }
-func (f *fakeBackend) SyncEmails(e []core.Email) error  { f.saved += len(e); return nil }
-func (f *fakeBackend) DeleteEmails([]string) error      { return nil }
+
+// GetEmails 与真实后端一样不带 HTML 正文，只标记 HasHTML。
+func (f *fakeBackend) GetEmails() ([]core.Email, error) {
+	out := make([]core.Email, len(f.emails))
+	for i, e := range f.emails {
+		e.HasHTML, e.HTMLBody = e.HTMLBody != "", ""
+		out[i] = e
+	}
+	return out, nil
+}
+func (f *fakeBackend) EmailHTML(id string) (string, error) {
+	f.htmlReads++
+	for _, e := range f.emails {
+		if e.ID == id {
+			return e.HTMLBody, nil
+		}
+	}
+	return "", nil
+}
+func (f *fakeBackend) SyncEmails(e []core.Email) error { f.saved += len(e); return nil }
+func (f *fakeBackend) DeleteEmails([]string) error     { return nil }
 func (f *fakeBackend) AIChat(core.AIChatInput) (string, error) {
 	return "```json\n{\"category\":\"finance\",\"summary\":\"信用卡账单 ¥1,234 待还\",\"why\":\"\"}\n```", nil
 }

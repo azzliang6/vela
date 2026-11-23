@@ -104,12 +104,35 @@ func nullStr(s string) any {
 	return s
 }
 
-// GetEmails 读取全部邮件，按时间倒序（对应 db_get_emails）。
-func (d *DB) GetEmails() ([]Email, error) {
+// GetEmails 读取全部邮件（含 HTML 正文），按时间倒序（对应 db_get_emails）。备份导出用。
+func (d *DB) GetEmails() ([]Email, error) { return d.readEmails(true) }
+
+// ListEmails 读取全部邮件但不带 HTML 正文（只标记 HasHTML），供界面列表常驻内存；
+// HTML 正文动辄几十上百 KB，打开邮件时再用 EmailHTML 读取。
+func (d *DB) ListEmails() ([]Email, error) { return d.readEmails(false) }
+
+// EmailHTML 读取一封邮件的 HTML 正文；没有时返回空串。
+func (d *DB) EmailHTML(id string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var html sql.NullString
+	err := d.db.QueryRow(`SELECT html_body FROM emails WHERE id = ?`, id).Scan(&html)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return html.String, err
+}
+
+func (d *DB) readEmails(withHTML bool) ([]Email, error) {
+	htmlCol := "html_body"
+	if !withHTML {
+		// 只取一个占位标记：非空时为 "1"
+		htmlCol = "CASE WHEN html_body IS NULL OR html_body = '' THEN NULL ELSE '1' END"
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	rows, err := d.db.Query(`SELECT id, account_id, folder, sender, recipients, cc, subject, body,
-		html_body, date, read, starred, category, ai_summary, ai_why, attachments, thread_count,
+		` + htmlCol + `, date, read, starred, category, ai_summary, ai_why, attachments, thread_count,
 		uid, remote_name, message_id FROM emails ORDER BY date DESC`)
 	if err != nil {
 		return nil, err
@@ -133,7 +156,11 @@ func (d *DB) GetEmails() ([]Email, error) {
 			_ = json.Unmarshal([]byte(cc.String), &e.CC)
 		}
 		_ = json.Unmarshal([]byte(attachments), &e.Attachments)
-		e.HTMLBody, e.Category, e.AISummary, e.AIWhy = html.String, cat.String, sum.String, why.String
+		e.Category, e.AISummary, e.AIWhy = cat.String, sum.String, why.String
+		e.HasHTML = html.String != ""
+		if withHTML {
+			e.HTMLBody = html.String
+		}
 		e.Read, e.Starred = read != 0, starred != 0
 		e.RemoteName, e.MessageID = remote.String, mid.String
 		if uid.Valid {
@@ -174,11 +201,21 @@ func (d *DB) UpsertEmails(emails []Email) error {
 
 // upsertEmailsTx 在事务里全量 upsert 邮件；调用方持有 d.mu。
 func (d *DB) upsertEmailsTx(tx *sql.Tx, emails []Email) error {
-	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO emails
+	// 界面里的邮件不带 HTML 正文（HasHTML 但 HTMLBody 为空）：写回已读/星标等状态时
+	// 保留库里原有的 HTML，最后一个参数为 1 即表示「沿用原值」。
+	stmt, err := tx.Prepare(`INSERT INTO emails
 		(id, account_id, folder, sender, recipients, cc, subject, body, html_body,
 		 date, read, starred, category, ai_summary, ai_why, attachments, thread_count,
 		 uid, remote_name, message_id)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+		 account_id = excluded.account_id, folder = excluded.folder, sender = excluded.sender,
+		 recipients = excluded.recipients, cc = excluded.cc, subject = excluded.subject, body = excluded.body,
+		 html_body = CASE WHEN ? THEN emails.html_body ELSE excluded.html_body END,
+		 date = excluded.date, read = excluded.read, starred = excluded.starred, category = excluded.category,
+		 ai_summary = excluded.ai_summary, ai_why = excluded.ai_why, attachments = excluded.attachments,
+		 thread_count = excluded.thread_count, uid = excluded.uid, remote_name = excluded.remote_name,
+		 message_id = excluded.message_id`)
 	if err != nil {
 		return err
 	}
@@ -214,7 +251,8 @@ func (d *DB) upsertEmailsTx(tx *sql.Tx, emails []Email) error {
 		if _, err := stmt.Exec(stripNUL(e.ID), stripNUL(e.AccountID), e.Folder, js(e.From), js(to), cc,
 			stripNUL(e.Subject), stripNUL(e.Body), nullStr(stripNUL(e.HTMLBody)), e.Date,
 			b2i(e.Read), b2i(e.Starred), nullStr(e.Category), nullStr(stripNUL(e.AISummary)),
-			nullStr(stripNUL(e.AIWhy)), js(att), tc, uid, nullStr(e.RemoteName), nullStr(e.MessageID)); err != nil {
+			nullStr(stripNUL(e.AIWhy)), js(att), tc, uid, nullStr(e.RemoteName), nullStr(e.MessageID),
+			b2i(e.HasHTML && e.HTMLBody == "")); err != nil {
 			return fmt.Errorf("写入邮件失败：%v", err)
 		}
 	}

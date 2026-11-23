@@ -122,16 +122,38 @@ func (b *Backend) SyncAll() ([]SyncOutcome, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []SyncOutcome
-	for _, a := range accs {
-		r, err := b.SyncAccount(a.ID)
-		if err != nil {
-			log.Printf("[vela] 账户 %s 同步失败：%v", a.ID, err)
-			r = SyncOutcome{AccountID: a.ID, Err: err}
-		}
-		out = append(out, r)
+	ids := make([]string, len(accs))
+	for i, a := range accs {
+		ids[i] = a.ID
 	}
-	return out, nil
+	return SyncEach(ids, b.SyncAccount), nil
+}
+
+// SyncParallel 是同时同步的账户数上限。各账户连各自的服务器，并行之后总耗时
+// 约等于最慢的那个账户，而不是全部相加；上限避免账户很多时一下子开太多连接。
+const SyncParallel = 4
+
+// SyncEach 并行同步多个账户，结果按 ids 的顺序返回。失败的账户结果里带 Err，
+// 不影响其它账户。
+func SyncEach(ids []string, syncOne func(id string) (SyncOutcome, error)) []SyncOutcome {
+	out := make([]SyncOutcome, len(ids))
+	sem := make(chan struct{}, SyncParallel)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			r, err := syncOne(id)
+			if err != nil {
+				log.Printf("[vela] 账户 %s 同步失败：%v", id, err)
+				r = SyncOutcome{AccountID: id, Err: err}
+			}
+			out[i] = r
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // SetFlags ← mail_set_flags
@@ -180,7 +202,10 @@ func (b *Backend) Send(in SendInput) (string, error) {
 }
 
 // GetEmails ← db_get_emails
-func (b *Backend) GetEmails() ([]Email, error) { return b.DB.GetEmails() }
+func (b *Backend) GetEmails() ([]Email, error) { return b.DB.ListEmails() }
+
+// EmailHTML 读取一封邮件的 HTML 正文（界面打开邮件时按需加载）。
+func (b *Backend) EmailHTML(id string) (string, error) { return b.DB.EmailHTML(id) }
 
 // SyncEmails ← db_sync_emails
 func (b *Backend) SyncEmails(e []Email) error { return b.DB.UpsertEmails(e) }

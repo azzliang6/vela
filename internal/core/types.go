@@ -48,6 +48,10 @@ type Email struct {
 	MessageID    string `json:"messageId,omitempty"`
 	IsNewArrival bool   `json:"-"`
 	Real         bool   `json:"real,omitempty"`
+
+	// HasHTML 表示本地库里存有 HTML 正文。界面列表不把 HTML 读进内存（ListEmails），
+	// 打开邮件时再按 id 读取（EmailHTML）；此时 HTMLBody 为空而 HasHTML 为 true。
+	HasHTML bool `json:"-"`
 }
 
 // EmailID 返回真实邮件稳定的 id：账户:文件夹:UID。
