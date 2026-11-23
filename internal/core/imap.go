@@ -7,6 +7,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -73,12 +74,32 @@ func dial(cfg MailServerConfig) (*session, error) {
 			return nil, fmt.Errorf("连接 %s:%d 失败：%v", cfg.IMAPHost, cfg.IMAPPort, err)
 		}
 	}
-	if err := s.c.Login(cfg.Email, cfg.Password).Wait(); err != nil {
+	// 必须等服务器问候（* OK …）之后再发 LOGIN：QQ 邮箱会丢弃问候前收到的命令，
+	// 而 go-imap 默认连上就立刻发，结果 LOGIN 永远等不到回复，界面卡在「正在验证」。
+	if err := s.c.WaitGreeting(); err != nil {
+		s.c.Close()
+		return nil, fmt.Errorf("连接 %s 后没有收到服务器问候：%v", cfg.IMAPHost, err)
+	}
+	// 兜底：登录阶段服务器再不回应，也在限时后断开并报错，而不是无限等待。
+	var timedOut atomic.Bool
+	watchdog := time.AfterFunc(loginTimeout, func() {
+		timedOut.Store(true)
+		_ = s.c.Close()
+	})
+	err = s.c.Login(cfg.Email, cfg.Password).Wait()
+	watchdog.Stop()
+	if timedOut.Load() {
+		return nil, fmt.Errorf("登录 %s 超时：服务器 %s 内没有回应，请检查网络或稍后再试", cfg.IMAPHost, loginTimeout)
+	}
+	if err != nil {
 		s.c.Close()
 		return nil, loginError(err)
 	}
 	return s, nil
 }
+
+// loginTimeout 是等待 LOGIN 回复的上限；测试里会调小。
+var loginTimeout = 30 * time.Second
 
 func (s *session) close() {
 	_ = s.c.Logout().Wait()
