@@ -119,6 +119,18 @@ type App struct {
 	searchOpen   bool
 	paletteQ     string
 
+	backupOpen  bool
+	backupMode  string // export / import
+	backupPass  string
+	backupPass2 string
+	backupPath  string
+	backupErr   string
+	backupBusy  bool
+
+	keyStore  string      // 密钥目录（ConfigDir），还原后把备份携带的 mail.key 写回
+	dialogs   FileDialogs // 系统文件对话框（main 注入，测试用假实现）
+	themeHook func(theme string) // 主题变更时通知宿主（联动系统标题栏深浅色）
+
 	syncing        bool
 	syncedAt       time.Time
 	aiLoading      string
@@ -177,6 +189,34 @@ func New(be Mailer, settingsPath string) *App {
 // SetRuntime 注入主线程投递、通知和正文视图。
 func (a *App) SetRuntime(post func(func()), notify func(title, body string), body BodyView) {
 	a.post, a.async, a.notify, a.body = post, true, notify, body
+}
+
+// FileDialogs 是系统文件选择对话框的抽象（生产环境由 main 用 mygo.Dialog 实现）。
+type FileDialogs struct {
+	// SaveFile 弹出保存对话框，返回选择的路径；取消时 ok 为 false。
+	SaveFile func(title, defaultName string) (path string, ok bool)
+	// OpenFile 弹出选择文件对话框，返回选择的路径；取消时 ok 为 false。
+	OpenFile func(title string) (path string, ok bool)
+}
+
+// SetKeyStore 注入密钥目录（core.ConfigDir），备份还原用它读写 mail.key。
+func (a *App) SetKeyStore(dir string) { a.keyStore = dir }
+
+// Settings 暴露当前偏好设置（只读快照；主进程启动时读取主题来源用）。
+func (a *App) Settings() Settings { return a.settings }
+
+// SetDialogs 注入系统文件对话框。
+func (a *App) SetDialogs(d FileDialogs) { a.dialogs = d }
+
+// SetThemeChangeHook 注入主题变更回调（main 里联动 mygo.Theme.SetSource，
+// 让系统标题栏 / 窗口边框跟随应用内设置，而不是系统外观）。
+func (a *App) SetThemeChangeHook(fn func(theme string)) { a.themeHook = fn }
+
+// emitTheme 在偏好里的主题可能变化后通知宿主。
+func (a *App) emitTheme() {
+	if a.themeHook != nil && a.settings.Theme != "" {
+		a.themeHook(a.settings.Theme)
+	}
 }
 
 func (a *App) loadSettings() {

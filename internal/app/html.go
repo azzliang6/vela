@@ -6,10 +6,9 @@ import (
 	"html"
 	"regexp"
 	"strings"
-
-	"github.com/egoist/mygo/ui"
 	"sync"
 
+	"github.com/egoist/mygo/ui"
 	"github.com/microcosm-cc/bluemonday"
 )
 
@@ -43,11 +42,13 @@ func mailPolicy() *bluemonday.Policy {
 	return policy
 }
 
-// BodyTheme 是正文文档的配色，全部取自界面实际使用的主题（velaTheme），
+// BodyTheme 是正文文档的配色，全部取自界面实际使用的主题（velaTheme / velaPalette），
 // 不另外硬编码：Bg 就是阅读区的底色 Theme.Background。
 type BodyTheme struct {
 	Dark                                    bool
 	Bg, Text, Muted, Accent, Border, Select string
+	CardBg, SubtleBorder, AccentSoft        string
+	AccentBorder, TextSoft                  string
 	Scrollbar                               string
 	ScrollbarWidth                          float32
 }
@@ -64,11 +65,16 @@ func cssColor(c ui.Color) string {
 func BodyThemeFor(t *ui.Theme) BodyTheme {
 	w := t.ScrollbarWidth
 	if w <= 0 {
-		w = 6
+		w = 8
 	}
-	return BodyTheme{Dark: t.Dark, Bg: cssColor(t.Background), Text: cssColor(t.Text), Muted: cssColor(t.TextMuted),
+	p := velaPalette(t.Dark)
+	return BodyTheme{
+		Dark: t.Dark, Bg: cssColor(t.Background), Text: cssColor(t.Text), Muted: cssColor(t.TextMuted),
 		Accent: cssColor(t.Accent), Border: cssColor(t.Border), Select: cssColor(t.Selection),
-		Scrollbar: cssColor(t.Scrollbar), ScrollbarWidth: w}
+		CardBg: cssColor(p.CardBg), SubtleBorder: cssColor(p.SubtleDivider),
+		AccentSoft: cssColor(p.AccentSoft), AccentBorder: cssColor(p.AccentBorder), TextSoft: cssColor(p.TextSoft),
+		Scrollbar: cssColor(t.Scrollbar), ScrollbarWidth: w,
+	}
 }
 
 // WebViewBackground 是创建 WebView 时的默认底色（首帧之前），light-dark() 两套都取自主题。
@@ -90,21 +96,31 @@ func docKey(doc string) string {
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
-func headerHTML(h MailHeader, remote bool) string {
+func headerHTML(h MailHeader, dark bool, remote bool) string {
 	esc := html.EscapeString
 	var b strings.Builder
 	b.WriteString(`<header class="vela-h"><h1>` + esc(h.Subject) + `</h1><div class="vela-from">`)
-	initial := strings.ToUpper(firstRune(nonEmpty(h.FromName, h.FromEmail)))
-	b.WriteString(`<span class="vela-av">` + esc(initial) + `</span><div class="vela-who"><b>` + esc(h.FromName) +
-		`</b>&nbsp; &lt;` + esc(h.FromEmail) + `&gt;<div class="vela-m">` + esc(h.Recipients) + `</div></div>`)
+	seed := nonEmpty(h.FromName, h.FromEmail)
+	avBg, avFg := avatarTone(seed, dark)
+	initial := senderInitial(h.FromName, h.FromEmail)
+	b.WriteString(`<span class="vela-av" style="background:` + cssColor(avBg) + `;color:` + cssColor(avFg) + `">` + esc(initial) + `</span>`)
+	b.WriteString(`<div class="vela-who"><div class="vela-sender"><b>` + esc(nonEmpty(h.FromName, h.FromEmail)) + `</b>`)
+	if h.FromEmail != "" && h.FromName != "" {
+		b.WriteString(` <span class="vela-addr">&lt;` + esc(h.FromEmail) + `&gt;</span>`)
+	}
+	b.WriteString(`</div>`)
+	if h.Recipients != "" {
+		b.WriteString(`<div class="vela-m">` + esc(h.Recipients) + `</div>`)
+	}
+	b.WriteString(`</div>`)
 	if h.Date != "" {
 		b.WriteString(`<span class="vela-m vela-date">` + esc(h.Date) + `</span>`)
 	}
 	b.WriteString(`</div>`)
 	if h.Summary != "" {
-		b.WriteString(`<div class="vela-ai"><div class="vela-ai-t">` + esc(h.SummaryTitle) + `</div>` + esc(h.Summary))
+		b.WriteString(`<div class="vela-ai"><div class="vela-ai-t">✦ ` + esc(h.SummaryTitle) + `</div><div class="vela-ai-s">` + esc(h.Summary) + `</div>`)
 		if h.Why != "" {
-			b.WriteString(`<div class="vela-m">` + esc(h.Why) + `</div>`)
+			b.WriteString(`<div class="vela-m vela-ai-w">` + esc(h.Why) + `</div>`)
 		}
 		b.WriteString(`</div>`)
 	}
@@ -116,17 +132,10 @@ func headerHTML(h MailHeader, remote bool) string {
 		b.WriteString(`</div>`)
 	}
 	if remote {
-		b.WriteString(`<div class="vela-m vela-blocked">已阻止远程图片</div>`)
+		b.WriteString(`<div class="vela-blocked">已阻止远程图片以保护隐私</div>`)
 	}
 	b.WriteString(`</header>`)
 	return b.String()
-}
-
-func firstRune(s string) string {
-	for _, r := range s {
-		return string(r)
-	}
-	return "?"
 }
 
 // MailCSP 是正文文档的内容安全策略：
@@ -152,28 +161,38 @@ func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bo
 		scheme = "dark"
 	}
 	sw := fmt.Sprintf("%gpx", th.ScrollbarWidth)
+	accentSoft := nonEmpty(th.AccentSoft, th.Select)
+	accentBorder := nonEmpty(th.AccentBorder, th.Border)
+	cardBg := nonEmpty(th.CardBg, th.Bg)
+	subtleBorder := nonEmpty(th.SubtleBorder, th.Border)
 	css := "html,body{margin:0!important;padding:0!important;border:0!important;background:" + th.Bg + "!important;color:" + th.Text + "}" +
-		"html{scrollbar-width:thin;scrollbar-color:" + th.Scrollbar + " transparent}" +
-		"::-webkit-scrollbar{width:" + sw + ";height:" + sw + ";background:transparent}" +
-		"::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}" +
-		"::-webkit-scrollbar-thumb{background:" + th.Scrollbar + ";border-radius:" + sw + "}" +
+		"html{--scrollbar-thumb:" + th.Scrollbar + ";--scrollbar-track:transparent;accent-color:" + th.Accent + ";scrollbar-width:auto;scrollbar-color:" + th.Scrollbar + " transparent}" +
+		"::selection{background:" + th.Select + "}" +
+		"@supports not (scrollbar-color: auto){" +
+		"::-webkit-scrollbar{width:" + sw + ";height:" + sw + ";background:var(--scrollbar-track)}" +
+		"::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:var(--scrollbar-track)}" +
+		"::-webkit-scrollbar-thumb{background:var(--scrollbar-thumb);border-radius:" + sw + "}" +
 		"::-webkit-scrollbar-button{display:none}" +
-		".vela-wrap{font:14px/1.6 -apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;word-wrap:break-word;overflow-wrap:anywhere}" +
-		".vela-h{padding:20px 28px 12px;font:14px/1.5 -apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;color:" + th.Text + "}" +
-		".vela-h h1{font-size:22px;line-height:1.3;margin:0 0 8px;font-weight:700}" +
-		".vela-from{display:flex;align-items:center;gap:10px}.vela-who{flex:1;min-width:0}" +
-		".vela-av{flex:none;width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:" + th.Select + ";color:" + th.Accent + ";font-weight:700}" +
-		".vela-m{font-size:12px;color:" + th.Muted + "}.vela-date{flex:none}" +
-		".vela-ai{margin-top:8px;padding:10px 12px;border-radius:8px;background:" + th.Select + "}.vela-ai-t{font-size:12px;font-weight:700;color:" + th.Accent + "}" +
-		".vela-att{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px}.vela-att span{font-size:13px;padding:5px 10px;border:1px solid " + th.Border + ";border-radius:8px}" +
-		".vela-blocked{margin-top:6px}" +
-		".vela-body{padding:4px 28px 28px}.vela-body a{color:" + th.Accent + "}.vela-body img{max-width:100%;height:auto}.vela-body table{max-width:100%}" +
-		".vela-body blockquote{margin:0 0 0 4px;padding-left:12px;border-left:3px solid " + th.Border + ";color:" + th.Muted + "}"
+		"}" +
+		".vela-wrap{font:14.5px/1.72 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;word-wrap:break-word;overflow-wrap:anywhere}" +
+		".vela-h{max-width:820px;padding:28px 36px 20px;border-bottom:1px solid " + subtleBorder + ";font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;color:" + th.Text + "}" +
+		".vela-h h1{font-size:23px;line-height:1.35;letter-spacing:-0.01em;margin:0 0 14px;font-weight:700}" +
+		".vela-from{display:flex;align-items:center;gap:12px}.vela-who{flex:1;min-width:0}" +
+		".vela-sender{font-size:14px;line-height:1.4}.vela-addr{color:" + th.Muted + ";font-weight:400;font-size:13px}" +
+		".vela-av{flex:none;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600}" +
+		".vela-m{font-size:12px;color:" + th.Muted + ";margin-top:2px}.vela-date{flex:none;margin-top:0}" +
+		".vela-ai{margin-top:14px;padding:12px 16px;border-radius:11px;background:" + accentSoft + ";border:1px solid " + accentBorder + "}" +
+		".vela-ai-t{font-size:12px;font-weight:700;letter-spacing:0.02em;color:" + th.Accent + ";margin-bottom:4px}" +
+		".vela-ai-s{font-size:13.5px;line-height:1.55}.vela-ai-w{margin-top:4px}" +
+		".vela-att{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}.vela-att span{font-size:12.5px;padding:6px 12px;background:" + cardBg + ";border:1px solid " + th.Border + ";border-radius:9px}" +
+		".vela-blocked{display:inline-block;margin-top:10px;padding:3px 10px;border-radius:999px;font-size:11.5px;color:" + th.Muted + ";background:" + cardBg + ";border:1px solid " + th.Border + "}" +
+		".vela-body{max-width:820px;padding:22px 36px 44px}.vela-body a{color:" + th.Accent + ";text-underline-offset:2px}.vela-body img{max-width:100%;height:auto;border-radius:6px}.vela-body table{max-width:100%}" +
+		".vela-body blockquote{margin:8px 0 8px 2px;padding:2px 0 2px 14px;border-left:3px solid " + th.Border + ";color:" + th.Muted + "}"
 	doc = "<!doctype html><html><head><meta charset=\"utf-8\">" +
 		"<meta http-equiv=\"Content-Security-Policy\" content=\"" + MailCSP + "\">" +
 		"<meta name=\"color-scheme\" content=\"" + scheme + "\">" +
 		"<meta name=\"viewport\" content=\"width=device-width\">" +
-		"<style>" + css + "</style></head><body><div class=\"vela-wrap\">" + headerHTML(h, remote) +
+		"<style>" + css + "</style></head><body><div class=\"vela-wrap\">" + headerHTML(h, th.Dark, remote) +
 		"<div class=\"vela-body\">" + clean + "</div></div></body></html>"
 	return doc, remote
 }

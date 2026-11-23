@@ -85,13 +85,47 @@ func main() {
 	}
 	a := app.New(be, filepath.Join(core.DataDir(), "settings.json"))
 
+	// 备份文件选择/保存走系统文件对话框
+	backupFilter := []mygo.FileFilter{{Name: "Vela 备份", Extensions: []string{"velabak"}}}
+	a.SetDialogs(app.FileDialogs{
+		SaveFile: func(title, defaultName string) (string, bool) {
+			p, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Title: title, DefaultPath: defaultName, Filters: backupFilter})
+			return p, err == nil && p != ""
+		},
+		OpenFile: func(title string) (string, bool) {
+			ps, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: title, Filters: backupFilter})
+			if err != nil || len(ps) == 0 {
+				return "", false
+			}
+			return ps[0], true
+		},
+	})
+	// 还原备份后把密钥材料写回 mail.key（换机迁移时密钥随备份携带）
+	a.SetKeyStore(core.ConfigDir())
+
 	mygo.App.WhenReady(func() {
+		// 主题来源同步到系统窗口外观：浅色主题下窗口边框/标题栏不再保持深色
+		src := mygo.ThemeSource(a.Settings().Theme)
+		if src == "" {
+			src = mygo.ThemeSystem
+		}
+		mygo.Theme.SetSource(src)
+		a.SetThemeChangeHook(func(theme string) {
+			s := mygo.ThemeSource(theme)
+			if s == "" {
+				s = mygo.ThemeSystem
+			}
+			mygo.Theme.SetSource(s)
+		})
+
 		var win *mygo.Window
 		var quitting bool
 		win = mygo.NewWindow(mygo.WindowOptions{
 			Title: "Vela 轻帆", Width: 1280, Height: 820, MinWidth: 1080, MinHeight: 700,
 			StateKey: "main", BackgroundColor: "light-dark(#f7f4ea, #141210)",
-			Content: ui.View(a.View),
+			// 无边框：应用自绘抬头并负责拖动，窗口控制按钮仍由系统提供
+			TitleBarStyle: mygo.TitleBarHidden,
+			Content:       ui.View(a.View),
 		})
 		// 关窗 = 隐藏到托盘，实时监控继续
 		win.OnClose(func(e *mygo.CloseEvent) {
