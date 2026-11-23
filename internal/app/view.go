@@ -961,7 +961,7 @@ func (a *App) addView(c *ui.Context, p palette) {
 	t := c.Theme()
 	f := &a.add
 	ui.Column(c).AlignItems(ui.Stretch).Children(func() {
-		modalHeader(c, p, "shield", "添加邮箱", "邮件、授权码都只保存在本机（授权码 AES-256-GCM 加密）。", func() { a.addOpen = false })
+		modalHeader(c, p, "shield", "添加邮箱", "邮件、授权码都只保存在本机（授权码 AES-256-GCM 加密）。", a.CancelAdd)
 
 		ui.Column(c).Padding(2, 24, 8).Gap(10).AlignItems(ui.Stretch).Children(func() {
 			ui.Column(c).Gap(4).AlignItems(ui.Stretch).Children(func() {
@@ -1009,7 +1009,7 @@ func (a *App) addView(c *ui.Context, p palette) {
 		})
 
 		ui.Row(c).Gap(8).Justify(ui.End).Padding(14, 24, 20).Children(func() {
-			pressable(c, ui.Button(c, "取消")).OnClick(func() { a.addOpen = false })
+			pressable(c, ui.Button(c, "取消")).OnClick(a.CancelAdd)
 			label := "连接并添加"
 			if f.Busy {
 				label = "正在验证…"

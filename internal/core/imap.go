@@ -491,12 +491,17 @@ func MoveMessage(cfg MailServerConfig, remoteName string, uid uint32, kind Folde
 }
 
 // TestConnection 登录并返回文件夹列表，不写任何数据。
+// 验证超时只保护「添加邮箱」这一步：连接建立后 go-imap 自己的读超时是 30s，
+// 但 TLS 握手、DNS、或者对方不回 banner 都可能卡更久。这里再用一个 2 分钟的
+// 兜底 deadline，到点直接关掉底层连接，让任何等待中的命令立刻失败。
 func TestConnection(cfg MailServerConfig) ([]string, error) {
 	s, err := dial(cfg)
 	if err != nil {
 		return nil, err
 	}
 	defer s.close()
+	timer := time.AfterFunc(2*time.Minute, func() { _ = s.c.Close() })
+	defer timer.Stop()
 	list, err := s.c.List("", "*", nil).Collect()
 	if err != nil {
 		return nil, fmt.Errorf("读取文件夹列表失败：%v", err)

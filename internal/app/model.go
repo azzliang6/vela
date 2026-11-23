@@ -131,6 +131,7 @@ type App struct {
 	composeOpen  bool
 	add          AddForm
 	addOpen      bool
+	addGen       int // 取消/重开一次就 +1，让进行中的验证结果作废
 	settingsOpen bool
 	searchOpen   bool
 	paletteQ     string
@@ -956,9 +957,14 @@ func (a *App) SubmitAdd() {
 	in := core.AddAccountInput{Provider: a.providerID(f.Provider), Email: f.Email, Password: f.Password, Label: f.Label,
 		IMAPHost: f.IMAPHost, IMAPPort: atoiOr(f.IMAPPort, 993), SMTPHost: f.SMTPHost, SMTPPort: atoiOr(f.SMTPPort, 465)}
 	a.add.Busy, a.add.Err = true, ""
+	a.addGen++
+	gen := a.addGen
 	a.run(func() func() {
 		acc, err := a.be.AddAccount(in)
 		return func() {
+			if gen != a.addGen {
+				return // 用户已经取消/重开了一次，这次结果丢弃
+			}
 			a.add.Busy = false
 			if err != nil {
 				a.add.Err = err.Error()
@@ -972,6 +978,15 @@ func (a *App) SubmitAdd() {
 			a.Sync()
 		}
 	})
+}
+
+// CancelAdd 关掉添加邮箱弹窗并让进行中的验证结果作废。
+// 后台那次网络调用无法真正中断（go-imap 没有 context），但回主线程时
+// gen 已经不一样了，不会写回 Err / 关掉弹窗 / 加账户。
+func (a *App) CancelAdd() {
+	a.addOpen = false
+	a.resetAdd()
+	a.addGen++
 }
 
 // RemoveAccount 移除账户及其本地邮件。

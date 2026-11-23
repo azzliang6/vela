@@ -235,6 +235,38 @@ func TestAddMailbox(t *testing.T) {
 	}
 }
 
+// 验证进行中关掉弹窗再开，之前那次的结果不能写回来污染新表单。
+func TestAddCancelDiscardsStaleResult(t *testing.T) {
+	a, _ := newTestApp()
+
+	// 模拟后台还在跑：让 AddAccount 的返回值延迟到下次 post 才回来
+	pending := make(chan func(), 1)
+	a.post = func(fn func()) { pending <- fn }
+	a.async = true
+	defer func() { a.post, a.async = func(fn func()) { fn() }, false }()
+
+	a.addOpen = true
+	a.add.Email = "new@163.com"
+	a.add.Password = "code"
+	a.SubmitAdd()
+	if !a.add.Busy {
+		t.Fatal("SubmitAdd 应立刻进入 busy")
+	}
+
+	a.CancelAdd()
+	if a.addOpen || a.add.Busy || a.add.Email != "" {
+		t.Fatalf("取消应清掉表单：open=%v busy=%v email=%q", a.addOpen, a.add.Busy, a.add.Email)
+	}
+
+	// 后台那次调用的 done 回调现在才跑回来——因为 gen 已经变了，结果应被丢弃
+	(<-pending)()
+	if a.add.Busy || a.add.Err != "" || len(a.accounts) != 1 {
+		t.Fatalf("过期结果不应写回：busy=%v err=%q accounts=%d", a.add.Busy, a.add.Err, len(a.accounts))
+	}
+	// f.added 记录的是后台那次 AddAccount 确实被调用了，不代表界面合并了它；
+	// 界面的 accounts 不变就够了。
+}
+
 func TestSyncMergesPrunesAndNotifies(t *testing.T) {
 	a, f := newTestApp()
 	var notes []string
