@@ -177,14 +177,6 @@ func main() {
 					return
 				}
 				ev.PreventDefault()
-				if ev.URL == app.ShowImagesURL {
-					// 「已阻止远程图片」被点了：重新生成文档，放行远程图片
-					if e := a.Selected(); e != nil {
-						id := e.ID
-						win.Update(func() { a.ShowImages(id) })
-					}
-					return
-				}
 				if ev.UserInitiated && (strings.HasPrefix(ev.URL, "http://") || strings.HasPrefix(ev.URL, "https://") || strings.HasPrefix(ev.URL, "mailto:")) {
 					_ = mygo.Shell.OpenExternal(ev.URL)
 				}

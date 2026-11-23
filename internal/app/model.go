@@ -171,8 +171,6 @@ type App struct {
 	visMemo visMemo   // Visible 的结果缓存：同一帧内、两次输入之间不重复扫描全部邮件
 	docMemo docMemo   // 当前 HTML 正文生成好的文档：清洗 HTML 很贵，不每帧重做
 	html    htmlCache // 按需加载的 HTML 正文
-	// 点了「显示图片」的邮件：之后重新生成文档时放行远程图片
-	showImages map[string]bool
 
 	// post 把后台结果送回主线程；async 为 false 时同步执行（测试用）。
 	post  func(func())

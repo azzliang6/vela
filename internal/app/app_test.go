@@ -358,8 +358,8 @@ func TestMailDocumentThemeAndCSP(t *testing.T) {
 			t.Errorf("文档缺少 %q", want)
 		}
 	}
-	if strings.Contains(doc, "<script") || strings.Contains(MailCSP, "img-src *") {
-		t.Error("脚本或远程图片未被阻止")
+	if strings.Contains(doc, "<script") || !strings.Contains(MailCSP, "script-src 'none'") {
+		t.Error("脚本未被阻止")
 	}
 	if !remote {
 		t.Error("应识别出远程图片")
@@ -442,23 +442,17 @@ func TestViewPassesPaneColorAndHeader(t *testing.T) {
 	}
 }
 
-// 点「显示图片」后：文档改用放行远程图片的 CSP，并且保持居中。
-func TestShowImagesReloadsDocument(t *testing.T) {
-	a, _ := newTestApp()
-	src := `<p>x</p><img src="https://t.example/p.gif">`
-	th := BodyThemeFor(velaTheme(false))
-	h := MailHeader{Subject: "S"}
-	doc, _ := a.mailDocument("m1", src, th, h)
-	if !strings.Contains(doc, "已阻止远程图片") || !strings.Contains(doc, MailCSP) {
-		t.Fatalf("默认应阻止远程图片：%s", doc)
+// 远程图片默认加载；脚本仍被阻止；正文保持居中。
+func TestMailDocumentLoadsRemoteImages(t *testing.T) {
+	doc, remote := MailDocument(`<p>x</p><img src="https://t.example/p.gif">`, BodyThemeFor(velaTheme(false)), MailHeader{Subject: "S"})
+	if !strings.Contains(doc, MailCSP) || !strings.Contains(MailCSP, "img-src data: cid: https: http:") {
+		t.Fatalf("应允许远程图片：%s", doc)
 	}
-	a.ShowImages("m1")
-	doc, _ = a.mailDocument("m1", src, th, h)
-	if !strings.Contains(doc, MailCSPImages) || strings.Contains(doc, MailCSP+"\">") {
-		t.Fatalf("显示图片后应放行远程图片：%s", doc)
+	if !remote {
+		t.Fatal("应识别出远程图片")
 	}
-	if !strings.Contains(doc, "已加载远程图片") {
-		t.Fatalf("应提示图片已加载：%s", doc)
+	if strings.Contains(doc, "<script") || !strings.Contains(doc, "script-src 'none'") {
+		t.Fatal("脚本仍应被阻止")
 	}
 	// 抬头与正文居中，最大化窗口时不会挤在左边
 	if !strings.Contains(doc, ".vela-body{max-width:820px;margin:0 auto") {
