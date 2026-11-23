@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"fmt"
 	"log"
@@ -24,6 +25,32 @@ import (
 
 //go:embed resources/tray.png
 var trayIcon []byte
+
+// updater 把 MyGo 的应用内更新接到 app.Updater 接口上。
+type updater struct{}
+
+func (updater) Enabled() bool { return mygo.Updater.Enabled() }
+
+func (updater) Check(ctx context.Context) (*app.UpdateInfo, error) {
+	u, err := mygo.Updater.Check(ctx)
+	if err != nil || u == nil {
+		return nil, err
+	}
+	return &app.UpdateInfo{Version: u.Version, Notes: u.Notes}, nil
+}
+
+func (updater) Install(ctx context.Context, progress func(done, total int64)) error {
+	u, err := mygo.Updater.Check(ctx)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		return nil // 检查与安装之间版本已被撤下，无需安装
+	}
+	return u.Install(ctx, progress)
+}
+
+func (updater) Relaunch() { mygo.App.Relaunch() }
 
 // webBody 是显示 HTML 正文的 WebView。
 //
@@ -85,6 +112,7 @@ func main() {
 		log.Fatal(err)
 	}
 	a := app.New(be, filepath.Join(core.DataDir(), "settings.json"))
+	a.SetUpdater(updater{})
 
 	// 备份文件选择/保存走系统文件对话框
 	backupFilter := []mygo.FileFilter{{Name: "Vela 备份", Extensions: []string{"velabak"}}}
@@ -102,6 +130,7 @@ func main() {
 		},
 	})
 	mygo.App.WhenReady(func() {
+		a.SetVersion(mygo.App.Version())
 		// 主题来源同步到系统窗口外观：浅色主题下窗口边框/标题栏不再保持深色
 		src := mygo.ThemeSource(a.Settings().Theme)
 		if src == "" {
@@ -166,6 +195,12 @@ func main() {
 		}
 		a.SetRuntime(win.Update, notify, bodyView)
 		win.Invalidate()
+
+		// 启动后静默检查一次更新：有新版本只提示一句，进「设置 → 关于与更新」安装
+		go func() {
+			time.Sleep(10 * time.Second)
+			win.Update(a.AutoCheckUpdate)
+		}()
 
 		be.StartWatcher(func(acc string, emails []core.Email) {
 			win.Update(func() { a.OnNewMail(acc, emails) })

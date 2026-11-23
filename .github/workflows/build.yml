@@ -41,6 +41,9 @@ jobs:
         if: matrix.name == 'Windows'
         run: sudo apt-get update && sudo apt-get install -y nsis
       - name: Build and package
+        env:
+          # 应用内更新的签名私钥（Settings → Secrets → MYGO_UPDATER_PRIVATE_KEY）
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
         run: go tool mygo build -platform "${{ matrix.platform }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -77,9 +80,16 @@ jobs:
           # 免安装版 Windows 程序
           exe=$(find artifacts -type f -name 'Vela.exe' | head -n1)
           [ -n "$exe" ] && cp "$exe" "dist/Vela-${v}-windows-amd64-portable.exe"
+          # 应用内更新的清单（update-<platform>.json）与签名压缩包。
+          # 压缩包已在上面按 tar.gz 收过，这里补上清单。
+          find artifacts -type f -name 'update-*.json' -exec cp {} dist/ \;
+          # 有私钥时才会有 update-*.json：缺了说明 CI 没配 MYGO_UPDATER_PRIVATE_KEY
+          if ! ls dist/update-*.json >/dev/null 2>&1; then
+            echo "::warning::没有 update-*.json，应用内更新不可用（检查 MYGO_UPDATER_PRIVATE_KEY）"
+          fi
           (cd dist && sha256sum * > SHA256SUMS.txt)
           ls -l dist
-          n=$(find dist -type f ! -name SHA256SUMS.txt | wc -l)
+          n=$(find dist -type f ! -name SHA256SUMS.txt ! -name 'update-*.json' | wc -l)
           if [ "$n" -lt 6 ]; then
             echo "::error::只找到 $n 个安装包，预期 6 个（2 个 dmg、安装版与免安装版 exe、deb、tar.gz）"
             exit 1

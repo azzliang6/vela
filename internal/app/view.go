@@ -1117,6 +1117,9 @@ func (a *App) settingsView(c *ui.Context, p palette) {
 						}
 					})
 				}
+
+				// 分组四：关于与更新
+				a.updateView(c, p)
 			})
 		})
 

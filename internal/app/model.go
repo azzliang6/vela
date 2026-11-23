@@ -152,6 +152,11 @@ type App struct {
 	unreadRev   int
 	unreadLen   int
 
+	// 应用内更新
+	upd      Updater
+	version  string
+	updState updateState
+
 	dataGen        int // 数据被整体替换（还原备份）时递增，之前发起的同步结果据此作废
 	syncing        bool
 	syncedAt       time.Time

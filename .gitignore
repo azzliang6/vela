@@ -13,6 +13,9 @@ website/*.msi
 # 邮箱授权码加密密钥（本机生成，绝不入库；丢失后需重新输入授权码）
 mail.key
 vela.config.json
+
+# 应用内更新的签名私钥（绝不入库；丢失后已安装的应用无法再更新）
+mygo-update.key
 build/
 /vela
 *.exe

@@ -65,3 +65,17 @@ git tag v0.4.0 && git push origin v0.4.0
 ```
 
 构建通过后，工作流会自动创建 GitHub Release，上传 macOS（arm64 / amd64）的 dmg、Windows 安装版与免安装版、Linux 的 deb 与 tar.gz，以及 `SHA256SUMS.txt`。标签与 `mygo.json` 的版本不一致时发布会失败。
+
+### 应用内更新
+
+安装版（macOS 的 .app、Windows 安装版与免安装版、Linux 解压运行或 `install.sh` 安装的版本）可以在「设置 → 关于与更新」里检查并安装新版本，装完自动重启。启动 10 秒后也会静默检查一次，有新版本只提示一句。
+
+更新包经过签名校验：`mygo.json` 的 `updates.publicKey` 是公钥，只会接受用对应私钥签名的更新。私钥不进仓库，第一次配置时生成：
+
+```sh
+go tool mygo keygen        # 写出 ~/.config/mygo/update-keys/mygo-update.key 与 .pub
+```
+
+把 `.pub` 的内容填进 `updates.publicKey`，把 `.key` 的内容存成仓库的 Secret `MYGO_UPDATER_PRIVATE_KEY`（Settings → Secrets and variables → Actions）。**私钥丢了，已安装的旧版本就再也收不到更新，只能让用户手动重装**，请另存一份。
+
+`.deb` 由系统包管理器升级，AppImage 不能自行替换，这两类安装方式下「关于与更新」会说明不支持。

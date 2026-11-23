@@ -58,6 +58,12 @@ func TestShots(t *testing.T) {
 
 	_ = tt.Click("设置")
 	save(tt, "settings")
+	tt.Scroll(640, 400, 0, 2000)
+	tt.Advance(320 * time.Millisecond)
+	f, _ := os.Create(dir + "/settings-update.png")
+	_ = png.Encode(f, tt.Image())
+	f.Close()
+	tt.Scroll(640, 400, 0, -2000)
 	a.settingsOpen = false
 	tt.Frame()
 
