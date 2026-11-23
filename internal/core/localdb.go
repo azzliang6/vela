@@ -164,13 +164,21 @@ func (d *DB) UpsertEmails(emails []Email) error {
 	if err != nil {
 		return err
 	}
+	if err := d.upsertEmailsTx(tx, emails); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertEmailsTx 在事务里全量 upsert 邮件；调用方持有 d.mu。
+func (d *DB) upsertEmailsTx(tx *sql.Tx, emails []Email) error {
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO emails
 		(id, account_id, folder, sender, recipients, cc, subject, body, html_body,
 		 date, read, starred, category, ai_summary, ai_why, attachments, thread_count,
 		 uid, remote_name, message_id)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	defer stmt.Close()
@@ -206,11 +214,10 @@ func (d *DB) UpsertEmails(emails []Email) error {
 			stripNUL(e.Subject), stripNUL(e.Body), nullStr(stripNUL(e.HTMLBody)), e.Date,
 			b2i(e.Read), b2i(e.Starred), nullStr(e.Category), nullStr(stripNUL(e.AISummary)),
 			nullStr(stripNUL(e.AIWhy)), js(att), tc, uid, nullStr(e.RemoteName), nullStr(e.MessageID)); err != nil {
-			tx.Rollback()
 			return fmt.Errorf("写入邮件失败：%v", err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // DeleteEmails 删除指定邮件（对应 db_delete_emails）。

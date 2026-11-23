@@ -10,9 +10,32 @@ import (
 // Backend 汇总原 Tauri command 的全部能力，界面直接调用它的方法。
 // 每个方法一一对应 src-tauri 里同名的命令（见 README 的映射表）。
 // 网络方法会阻塞，界面需在 goroutine 里调用。
+// crypto/secret 由互斥锁保护：备份还原会换密钥，监控在后台 goroutine 持续读它。
 type Backend struct {
 	DB     *DB
-	Crypto *Crypto
+	mu     sync.Mutex
+	crypto *Crypto
+	secret string
+}
+
+// Crypto 返回当前加密器（备份还原换密钥后立即生效）。
+func (b *Backend) Crypto() *Crypto {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.crypto
+}
+
+// Secret 返回当前密钥材料（导出备份时放进备份文件）。
+func (b *Backend) Secret() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.secret
+}
+
+func (b *Backend) setCrypto(secret string, c *Crypto) {
+	b.mu.Lock()
+	b.secret, b.crypto = secret, c
+	b.mu.Unlock()
 }
 
 // OpenBackend 打开默认位置（与 Tauri 版相同）的数据库和密钥。
@@ -21,11 +44,21 @@ func OpenBackend() (*Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := LoadCrypto(ConfigDir())
-	if err != nil {
-		return nil, err
+	secret, ok := LoadSecret(ConfigDir())
+	var c *Crypto
+	if ok {
+		c = NewCrypto(secret)
+	} else {
+		secret, err = GenerateSecretFile(ConfigDir())
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		c = NewCrypto(secret)
 	}
-	return &Backend{DB: db, Crypto: c}, nil
+	b := &Backend{DB: db}
+	b.setCrypto(secret, c)
+	return b, nil
 }
 
 // Providers ← mail_providers
@@ -56,7 +89,7 @@ func (b *Backend) AddAccount(in AddAccountInput) (MailboxAccount, error) {
 	if _, err := TestConnection(cfg); err != nil {
 		return MailboxAccount{}, err
 	}
-	return b.DB.UpsertAccount(cfg, label, b.Crypto)
+	return b.DB.UpsertAccount(cfg, label, b.Crypto())
 }
 
 // ListAccounts ← mail_list_accounts
@@ -72,7 +105,7 @@ func (b *Backend) RemoveAccount(id string) error {
 
 // SyncAccount ← mail_sync_account
 func (b *Backend) SyncAccount(id string) (SyncOutcome, error) {
-	cfg, err := b.DB.LoadConfig(id, b.Crypto)
+	cfg, err := b.DB.LoadConfig(id, b.Crypto())
 	if err != nil {
 		return SyncOutcome{}, err
 	}
@@ -116,7 +149,7 @@ func (b *Backend) SyncAll() ([]SyncOutcome, error) {
 
 // SetFlags ← mail_set_flags
 func (b *Backend) SetFlags(account, remoteName string, uid uint32, read, starred *bool) error {
-	cfg, err := b.DB.LoadConfig(account, b.Crypto)
+	cfg, err := b.DB.LoadConfig(account, b.Crypto())
 	if err != nil {
 		return err
 	}
@@ -134,7 +167,7 @@ func (b *Backend) Trash(account, remoteName string, uid uint32) error {
 }
 
 func (b *Backend) move(account, remoteName string, uid uint32, k FolderKind) error {
-	cfg, err := b.DB.LoadConfig(account, b.Crypto)
+	cfg, err := b.DB.LoadConfig(account, b.Crypto())
 	if err != nil {
 		return err
 	}
@@ -152,7 +185,7 @@ type SendInput struct {
 
 // Send ← mail_send
 func (b *Backend) Send(in SendInput) (string, error) {
-	cfg, err := b.DB.LoadConfig(in.AccountID, b.Crypto)
+	cfg, err := b.DB.LoadConfig(in.AccountID, b.Crypto())
 	if err != nil {
 		return "", err
 	}
@@ -247,7 +280,7 @@ func (w *Watcher) watch(id string, stop chan struct{}) {
 			return
 		default:
 		}
-		cfg, err := w.b.DB.LoadConfig(id, w.b.Crypto)
+		cfg, err := w.b.DB.LoadConfig(id, w.b.Crypto())
 		if err != nil {
 			log.Printf("[vela] 实时监控退出：账户 %s 已不可用", id)
 			return
