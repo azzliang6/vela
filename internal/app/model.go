@@ -81,6 +81,22 @@ type Compose struct {
 	Body      string
 	InReplyTo string
 	Sending   bool
+
+	DraftID string // 从草稿箱继续编辑时是那封草稿的 id：再存会原地更新，发送后删除
+	base    string // 打开或上次保存时的内容指纹，关闭时据此判断有没有未保存的改动
+	discard bool   // 用户点了「舍弃」：关闭时不自动存草稿
+}
+
+func (c *Compose) fingerprint() string {
+	return strings.Join([]string{c.AccountID, c.To, c.CC, c.Subject, c.Body, c.InReplyTo}, "\x00")
+}
+
+// dirty 报告写信窗口里有没有值得保存、且还没保存的内容。
+func (c *Compose) dirty() bool {
+	if c.fingerprint() == c.base {
+		return false
+	}
+	return strings.TrimSpace(c.To+c.CC+c.Subject+c.Body) != ""
 }
 
 // AddForm 是添加邮箱表单。
@@ -129,6 +145,11 @@ type App struct {
 
 	dialogs   FileDialogs        // 系统文件对话框（main 注入，测试用假实现）
 	themeHook func(theme string) // 主题变更时通知宿主（联动系统标题栏深浅色）
+
+	unreadHook  func(n int) // 收件箱未读数变化时通知宿主（Dock 角标、托盘图标）
+	unreadShown int         // 上次通知的未读数；-1 表示还没通知过
+	unreadRev   int
+	unreadLen   int
 
 	dataGen        int // 数据被整体替换（还原备份）时递增，之前发起的同步结果据此作废
 	syncing        bool
@@ -213,6 +234,28 @@ func (a *App) SetDialogs(d FileDialogs) { a.dialogs = d }
 // SetThemeChangeHook 注入主题变更回调（main 里联动 mygo.Theme.SetSource，
 // 让系统标题栏 / 窗口边框跟随应用内设置，而不是系统外观）。
 func (a *App) SetThemeChangeHook(fn func(theme string)) { a.themeHook = fn }
+
+// SetUnreadHook 注册未读数变化的回调（宿主据此更新 Dock 角标与托盘图标）。
+// n 是全部账户收件箱里的未读封数，只在变化时调用。
+func (a *App) SetUnreadHook(fn func(n int)) { a.unreadHook, a.unreadShown = fn, -1 }
+
+// reportUnread 每帧调用：邮件变化时重新统计收件箱未读数，变了才通知宿主。
+func (a *App) reportUnread() {
+	if a.unreadHook == nil || (a.unreadRev == a.rev && a.unreadLen == len(a.emails) && a.unreadShown >= 0) {
+		return
+	}
+	a.unreadRev, a.unreadLen = a.rev, len(a.emails)
+	n := 0
+	for i := range a.emails {
+		if e := &a.emails[i]; !e.Read && e.Folder == "inbox" {
+			n++
+		}
+	}
+	if n != a.unreadShown {
+		a.unreadShown = n
+		a.unreadHook(n)
+	}
+}
 
 // emitTheme 在偏好里的主题可能变化后通知宿主。
 func (a *App) emitTheme() {
@@ -690,7 +733,56 @@ func (a *App) StartCompose(mode string) {
 		}
 		c.Body = quoted
 	}
+	c.base = c.fingerprint()
 	a.compose, a.composeOpen = c, true
+}
+
+// OpenDraft 在写信窗口里继续编辑一封草稿。
+func (a *App) OpenDraft(id string) {
+	_, e := a.find(id)
+	if e == nil || e.Folder != "drafts" {
+		return
+	}
+	join := func(cs []core.Contact) string {
+		var out []string
+		for _, x := range cs {
+			out = append(out, x.Email)
+		}
+		return strings.Join(out, ", ")
+	}
+	c := &Compose{Mode: "new", DraftID: e.ID, AccountID: e.AccountID, To: join(e.To), CC: join(e.CC),
+		Subject: e.Subject, Body: e.Body, InReplyTo: e.MessageID}
+	if c.InReplyTo != "" {
+		c.Mode = "reply"
+	}
+	if !slices.ContainsFunc(a.accounts, func(x core.MailboxAccount) bool { return x.ID == c.AccountID }) {
+		c.AccountID = "" // 草稿所属账户已被删除：改用默认账户
+		if len(a.accounts) > 0 {
+			c.AccountID = a.accounts[0].ID
+		}
+	}
+	c.base = c.fingerprint()
+	a.compose, a.composeOpen = c, true
+}
+
+// DiscardCompose 关闭写信窗口且不保存这次的改动（已存的草稿保持原样）。
+func (a *App) DiscardCompose() {
+	if a.compose != nil {
+		a.compose.discard = true
+	}
+	a.composeOpen = false
+}
+
+// composeClosed 在写信窗口被关闭（Esc、点遮罩、关闭按钮）后调用：
+// 有未保存的内容就自动存成草稿，免得一不小心把写了半天的信丢掉。
+func (a *App) composeClosed() {
+	c := a.compose
+	a.compose = nil
+	if c == nil || c.discard || !c.dirty() {
+		return
+	}
+	a.saveDraft(c)
+	a.toast("未发送的邮件已自动存为草稿")
 }
 
 func prefixed(p, s string) string {
@@ -745,29 +837,68 @@ func (a *App) SendCompose() {
 				Date: now.Format(time.RFC3339), Read: true, ThreadCount: 1, Attachments: []core.Attachment{}}
 			a.emails = append([]core.Email{sent}, a.emails...)
 			a.persist(sent)
-			a.compose, a.composeOpen = nil, false
+			if c.DraftID != "" { // 草稿已经寄出：从草稿箱移除
+				a.dropEmail(c.DraftID)
+			}
+			if a.compose == c {
+				a.compose, a.composeOpen = nil, false
+			}
 			a.toast("邮件已发送")
 		}
 	})
 }
 
-// SaveDraft 把写了一半的邮件存进草稿箱。
+// SaveDraft 把写了一半的邮件存进草稿箱并关闭写信窗口。
 func (a *App) SaveDraft() {
 	c := a.compose
 	if c == nil {
 		return
 	}
+	a.compose, a.composeOpen = nil, false
+	if strings.TrimSpace(c.To+c.CC+c.Subject+c.Body) == "" {
+		return // 什么都没写，不留空草稿
+	}
+	a.saveDraft(c)
+	a.toast("已存为草稿")
+}
+
+// saveDraft 写入草稿：继续编辑的草稿原地更新（不产生重复），否则新建一封。
+// 回复草稿的 In-Reply-To 存在 MessageID 里（本地草稿没有自己的 Message-ID）。
+func (a *App) saveDraft(c *Compose) {
 	now := a.now()
-	d := core.Email{ID: fmt.Sprintf("local:drafts:%d", now.UnixNano()), AccountID: c.AccountID, Folder: "drafts",
-		From: core.Contact{Name: c.AccountID, Email: c.AccountID}, Subject: c.Subject, Body: c.Body,
+	contacts := func(s string) []core.Contact {
+		var out []core.Contact
+		for _, t := range splitAddrs(s) {
+			out = append(out, core.Contact{Name: t, Email: t})
+		}
+		return out
+	}
+	d := core.Email{ID: c.DraftID, AccountID: c.AccountID, Folder: "drafts",
+		From: core.Contact{Name: c.AccountID, Email: c.AccountID}, To: contacts(c.To), CC: contacts(c.CC),
+		Subject: c.Subject, Body: c.Body, MessageID: c.InReplyTo,
 		Date: now.Format(time.RFC3339), Read: true, ThreadCount: 1, Attachments: []core.Attachment{}}
-	for _, t := range splitAddrs(c.To) {
-		d.To = append(d.To, core.Contact{Name: t, Email: t})
+	if i, old := a.find(c.DraftID); old != nil && c.DraftID != "" {
+		a.emails = slices.Delete(a.emails, i, i+1) // 更新后挪到最前（时间最新）
+	} else {
+		d.ID = fmt.Sprintf("local:drafts:%d", now.UnixNano())
 	}
 	a.emails = append([]core.Email{d}, a.emails...)
 	a.persist(d)
-	a.compose, a.composeOpen = nil, false
-	a.toast("已存为草稿")
+	c.DraftID, c.base = d.ID, c.fingerprint()
+}
+
+// dropEmail 从列表和本地库里删除一封邮件。
+func (a *App) dropEmail(id string) {
+	i, e := a.find(id)
+	if e == nil {
+		return
+	}
+	a.emails = slices.Delete(a.emails, i, i+1)
+	a.rev++
+	if a.selected == id {
+		a.selected = ""
+	}
+	a.run(func() func() { _ = a.be.DeleteEmails([]string{id}); return nil })
 }
 
 /* ———— 添加邮箱 ———— */

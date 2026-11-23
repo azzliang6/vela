@@ -17,6 +17,7 @@ type Backend struct {
 	DB     *DB
 	crypto *Crypto
 	secret string
+	source SecretSource // 密钥来自环境变量、系统钥匙串还是 mail.key
 
 	watcher atomic.Pointer[Watcher] // StartWatcher 之后非空；还原后用它立即重扫账户
 }
@@ -27,25 +28,22 @@ func (b *Backend) Crypto() *Crypto { return b.crypto }
 // Secret 返回本机密钥材料：导出时写进备份，还原时用它解开备份里的授权码密文。
 func (b *Backend) Secret() string { return b.secret }
 
+// SecretSource 说明授权码加密密钥存放在哪里（设置页展示用）。
+func (b *Backend) SecretSource() SecretSource { return b.source }
+
 // OpenBackend 打开默认位置（与 Tauri 版相同）的数据库和密钥。
 func OpenBackend() (*Backend, error) {
 	db, err := OpenDB(DataDir() + "/vela.db")
 	if err != nil {
 		return nil, err
 	}
-	secret, ok := LoadSecret(ConfigDir())
-	var c *Crypto
-	if ok {
-		c = NewCrypto(secret)
-	} else {
-		secret, err = GenerateSecretFile(ConfigDir())
-		if err != nil {
-			db.Close()
-			return nil, err
-		}
-		c = NewCrypto(secret)
+	secret, src, err := loadOrCreateSecret(ConfigDir())
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
-	return &Backend{DB: db, crypto: c, secret: secret}, nil
+	c := NewCrypto(secret)
+	return &Backend{DB: db, crypto: c, secret: secret, source: src}, nil
 }
 
 // Providers ← mail_providers

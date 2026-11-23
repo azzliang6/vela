@@ -10,6 +10,7 @@ package main
 
 import (
 	_ "embed"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -185,7 +186,24 @@ func main() {
 			log.Printf("[vela] 系统托盘不可用：%v", err)
 			quitting = true
 		}
-		_ = tray
+		// 未读提示：Dock / 启动器数字角标（macOS、部分 Linux 桌面），托盘图标红点与提示文字（全平台）
+		dotted := withUnreadDot(trayIcon)
+		a.SetUnreadHook(func(n int) {
+			go func() { // 在这一帧画完之后再改系统 UI
+				mygo.App.SetBadgeCount(n)
+				if tray == nil {
+					return
+				}
+				if n > 0 {
+					_ = tray.SetIcon(dotted, false)
+					tray.SetToolTip(fmt.Sprintf("Vela 轻帆 · %d 封未读", n))
+				} else {
+					_ = tray.SetIcon(trayIcon, false)
+					tray.SetToolTip("Vela 轻帆 · 新邮件实时监控中")
+				}
+			}()
+		})
+		win.Invalidate()
 	})
 	mygo.App.OnWindowAllClosed(func() { mygo.App.Quit() })
 	if err := mygo.App.Run(); err != nil {

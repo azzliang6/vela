@@ -48,8 +48,9 @@ func (a *App) View(c *ui.Context) {
 	velaModal(c, p, &a.searchOpen, 580, func() { a.paletteView(c, p) })
 	velaModal(c, p, &a.backupOpen, 500, func() { a.backupView(c, p) })
 	if !a.composeOpen && a.compose != nil && !a.compose.Sending {
-		a.compose = nil
+		a.composeClosed()
 	}
+	a.reportUnread()
 }
 
 func (a *App) shortcuts(c *ui.Context) {
@@ -652,22 +653,39 @@ func (a *App) detail(c *ui.Context, p palette, e *core.Email, bar ui.TitleBar) {
 		toolR = max(36, bar.Right+12)
 	}
 	ui.Row(c).Padding(12, toolR, 12, 36).Gap(4).AlignItems(ui.Center).DragWindow().Children(func() {
-		replyBtn := ui.ButtonBase(c).Padding(6, 12).Gap(6).Radius(8).
-			Background(p.CardBg).Border(1, t.Border).Label("回复").Tooltip("回复")
-		if replyBtn.Pressed() {
-			replyBtn.Background(t.SurfacePressed)
-		} else if replyBtn.Hovered() {
-			replyBtn.Background(t.SurfaceHover)
-		}
-		replyBtn.Children(func() {
-			ui.Icon(c, icon("reply")).FontSize(15).TextColor(p.TextSoft)
-			ui.Text(c, "回复").FontSize(13).FontWeight(500).TextColor(t.Text).SingleLine()
-		})
-		colorFade(c, replyBtn)
-		pressable(c, replyBtn).Margin(0, 2, 0, 0).OnClick(func() { a.StartCompose("reply") })
+		if e.Folder == "drafts" {
+			// 草稿：主按钮是继续编辑，回复 / 转发对自己的草稿没有意义
+			editBtn := ui.ButtonBase(c).Padding(6, 12).Gap(6).Radius(8).
+				Background(p.CardBg).Border(1, t.Border).Label("继续编辑").Tooltip("在写信窗口里继续编辑这封草稿")
+			if editBtn.Pressed() {
+				editBtn.Background(t.SurfacePressed)
+			} else if editBtn.Hovered() {
+				editBtn.Background(t.SurfaceHover)
+			}
+			editBtn.Children(func() {
+				ui.Icon(c, icon("square-pen")).FontSize(15).TextColor(p.TextSoft)
+				ui.Text(c, "继续编辑").FontSize(13).FontWeight(500).TextColor(t.Text).SingleLine()
+			})
+			colorFade(c, editBtn)
+			pressable(c, editBtn).Margin(0, 2, 0, 0).OnClick(func() { a.OpenDraft(id) })
+		} else {
+			replyBtn := ui.ButtonBase(c).Padding(6, 12).Gap(6).Radius(8).
+				Background(p.CardBg).Border(1, t.Border).Label("回复").Tooltip("回复")
+			if replyBtn.Pressed() {
+				replyBtn.Background(t.SurfacePressed)
+			} else if replyBtn.Hovered() {
+				replyBtn.Background(t.SurfaceHover)
+			}
+			replyBtn.Children(func() {
+				ui.Icon(c, icon("reply")).FontSize(15).TextColor(p.TextSoft)
+				ui.Text(c, "回复").FontSize(13).FontWeight(500).TextColor(t.Text).SingleLine()
+			})
+			colorFade(c, replyBtn)
+			pressable(c, replyBtn).Margin(0, 2, 0, 0).OnClick(func() { a.StartCompose("reply") })
 
-		ghostIconBtn(c, p, "reply-all", "回复全部", false).OnClick(func() { a.StartCompose("replyAll") })
-		ghostIconBtn(c, p, "forward", "转发", false).OnClick(func() { a.StartCompose("forward") })
+			ghostIconBtn(c, p, "reply-all", "回复全部", false).OnClick(func() { a.StartCompose("replyAll") })
+			ghostIconBtn(c, p, "forward", "转发", false).OnClick(func() { a.StartCompose("forward") })
+		}
 		ui.Box(c).Width(1).Height(16).Background(p.PaneDivider).Margin(0, 8)
 		ghostIconBtn(c, p, "archive", "归档此邮件", false).OnClick(func() { a.Move(id, "archive") })
 		ghostIconBtn(c, p, "trash-2", "删除此邮件", false).OnClick(func() { a.Move(id, "trash") })
@@ -919,11 +937,11 @@ func (a *App) composeView(c *ui.Context, p palette) {
 			}
 		})
 
-		// 底栏：左侧存草稿，右侧取消与发送
+		// 底栏：左侧存草稿，右侧舍弃与发送
 		ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(16, 24, 20).Children(func() {
 			pressable(c, ui.Button(c, "存草稿")).OnClick(a.SaveDraft)
 			ui.Spacer(c)
-			pressable(c, ui.Button(c, "取消")).OnClick(func() { a.composeOpen = false })
+			pressable(c, ui.Button(c, "舍弃").Tooltip("关闭且不保存这次的改动")).OnClick(a.DiscardCompose)
 			label := "发送"
 			if cp.Sending {
 				label = "发送中…"
@@ -1091,6 +1109,12 @@ func (a *App) settingsView(c *ui.Context, p palette) {
 							pressable(c, ui.Button(c, "导出备份…")).OnClick(a.StartBackupExport)
 							pressable(c, ui.Button(c, "从备份还原…")).OnClick(a.StartBackupImport)
 						})
+						if where := a.secretWhere(); where != "" {
+							ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+								ui.Icon(c, icon("shield")).FontSize(12).TextColor(t.TextMuted)
+								ui.Text(c, where).FontSize(11.5).TextColor(t.TextMuted)
+							})
+						}
 					})
 				}
 			})

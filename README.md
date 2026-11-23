@@ -44,7 +44,9 @@ go tool mygo build -platform windows/amd64,linux/amd64   # 交叉打包（Window
 | `vela.db`（SQLite） | Linux `~/.local/share/app.vela.mail`；macOS `~/Library/Application Support/app.vela.mail`；Windows `%APPDATA%\app.vela.mail` |
 | `mail.key` | 与系统配置目录下的 `app.vela.mail` 相同 |
 
-升级后已保存的账户和邮件可以直接用，表结构只是增加了几列（`uid`、`remote_name`、`message_id`）。`VELA_DATA_DIR` 会覆盖这两个目录，`VELA_SECRET` 会覆盖密钥。原来存在 WebView localStorage 里的界面设置（AI Key 等）不会迁移，需要重新设置一次。
+升级后已保存的账户和邮件可以直接用，表结构只是增加了几列（`uid`、`remote_name`、`message_id`）。`VELA_DATA_DIR` 会覆盖这两个目录，`VELA_SECRET` 会覆盖密钥。
+
+授权码的加密密钥优先保存在系统钥匙串（macOS 钥匙串、Windows 凭据管理器、Linux Secret Service）里。首次启动时如果发现旧的 `mail.key`，会把它迁进钥匙串，读回核对无误后才删除文件，并留下一个不含密钥的 `mail.key.keychain` 标记文件。钥匙串不可用时继续使用 `mail.key`。设置了 `VELA_DATA_DIR` 或 `VELA_NO_KEYCHAIN=1` 时不使用钥匙串。原来存在 WebView localStorage 里的界面设置（AI Key 等）不会迁移，需要重新设置一次。
 
 ## 备份与还原
 
@@ -53,3 +55,13 @@ go tool mygo build -platform windows/amd64,linux/amd64   # 交叉打包（Window
 - 还原不会更换本机密钥：授权码先用备份里的密钥材料解开，再用本机密钥（`mail.key`，或 `VELA_SECRET`）重新加密后写入，所以用 `VELA_SECRET` 的环境重启之后照常可用。
 - 覆盖之前会把本机当前数据复制一份到数据目录下的 `snapshots/vela-before-restore-<时间>.db`，只保留最近 3 份。想撤销还原，退出 Vela 后用这份副本替换 `vela.db` 即可。
 - 备份文件先压缩再加密（格式版本 2），通常只有未压缩时的几分之一。新版本能还原旧版导出的备份；旧版本的 Vela 读不了新格式，请先升级。
+
+## 发布
+
+把 `mygo.json` 里的 `version` 改成新版本并提交，然后推送同名标签：
+
+```sh
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+构建通过后，工作流会自动创建 GitHub Release，上传 macOS（arm64 / amd64）的 dmg、Windows 安装版与免安装版、Linux 的 deb 与 tar.gz，以及 `SHA256SUMS.txt`。标签与 `mygo.json` 的版本不一致时发布会失败。

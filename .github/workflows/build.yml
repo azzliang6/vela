@@ -46,3 +46,47 @@ jobs:
         with:
           name: vela-${{ matrix.name }}
           path: build/
+
+  # 推送 v* 标签时：校验版本号，把三个平台的安装包发布成 GitHub Release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches mygo.json version
+        run: |
+          want="v$(jq -r .version mygo.json)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 mygo.json 的版本 $want 不一致"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect installers
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          mkdir dist
+          # 文件名里的空格换成连字符，方便下载链接与命令行使用
+          find artifacts -type f \( -name '*.dmg' -o -name '*Setup*.exe' -o -name '*.deb' -o -name '*.tar.gz' \) -print0 |
+            while IFS= read -r -d '' f; do cp "$f" "dist/$(basename "$f" | tr ' ' '-')"; done
+          # 免安装版 Windows 程序
+          exe=$(find artifacts -type f -name 'Vela.exe' | head -n1)
+          [ -n "$exe" ] && cp "$exe" "dist/Vela-${v}-windows-amd64-portable.exe"
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -l dist
+          n=$(find dist -type f ! -name SHA256SUMS.txt | wc -l)
+          if [ "$n" -lt 6 ]; then
+            echo "::error::只找到 $n 个安装包，预期 6 个（2 个 dmg、安装版与免安装版 exe、deb、tar.gz）"
+            exit 1
+          fi
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Vela 轻帆 $GITHUB_REF_NAME" --generate-notes --verify-tag

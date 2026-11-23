@@ -29,6 +29,26 @@ func (a *App) backuper() backupCapable {
 
 const backupExt = ".velabak"
 
+// secretSourcer 是后端可选的能力：说明授权码加密密钥存放在哪里。
+type secretSourcer interface{ SecretSource() core.SecretSource }
+
+// secretWhere 返回设置页里关于密钥存放位置的一行说明。
+func (a *App) secretWhere() string {
+	s, ok := a.be.(secretSourcer)
+	if !ok {
+		return ""
+	}
+	switch s.SecretSource() {
+	case core.SecretFromKeychain:
+		return "授权码的加密密钥保存在系统钥匙串中"
+	case core.SecretFromEnv:
+		return "授权码的加密密钥来自 VELA_SECRET 环境变量"
+	case core.SecretFromFile:
+		return "授权码的加密密钥保存在数据目录的 mail.key 文件中（系统钥匙串不可用）"
+	}
+	return ""
+}
+
 func (a *App) StartBackupExport() { a.startBackup("export") }
 func (a *App) StartBackupImport() { a.startBackup("import") }
 

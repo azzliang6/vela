@@ -75,15 +75,23 @@ func GenerateSecretFile(dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("无法创建配置目录：%v", err)
 	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
+	secret, err := newSecret()
+	if err != nil {
 		return "", err
 	}
-	secret := base64.StdEncoding.EncodeToString(buf)
 	if err := os.WriteFile(filepath.Join(dir, "mail.key"), []byte(secret), 0o600); err != nil {
 		return "", fmt.Errorf("无法写入密钥文件：%v", err)
 	}
 	return secret, nil
+}
+
+// newSecret 生成 32 字节随机密钥（base64）。
+func newSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(buf), nil
 }
 
 // LoadCrypto 取得加密器，必要时首次生成 mail.key。
