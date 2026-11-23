@@ -5,11 +5,13 @@ import (
 	"io"
 	"mime"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/emersion/go-message"
 	_ "github.com/emersion/go-message/charset" // GBK / GB18030 / Big5 等中文编码
 	"github.com/emersion/go-message/mail"
 )
@@ -27,22 +29,15 @@ func ParseMessage(raw []byte, account, serverFolder string, uid uint32, seen, fl
 		Read: seen, Starred: flagged, ThreadCount: 1, Attachments: []Attachment{},
 	}
 	if from, _ := h.AddressList("From"); len(from) > 0 {
-		e.From = Contact{Name: from[0].Name, Email: from[0].Address}
+		e.From = Contact{Name: displayName(from[0].Name, from[0].Address), Email: from[0].Address}
 	} else {
 		e.From = Contact{Name: "未知发件人"}
-	}
-	if e.From.Name == "" {
-		e.From.Name = e.From.Email
 	}
 	conv := func(key string) []Contact {
 		list, _ := h.AddressList(key)
 		var out []Contact
 		for _, a := range list {
-			n := a.Name
-			if n == "" {
-				n = a.Address
-			}
-			out = append(out, Contact{Name: n, Email: a.Address})
+			out = append(out, Contact{Name: displayName(a.Name, a.Address), Email: a.Address})
 		}
 		return out
 	}
@@ -51,7 +46,7 @@ func ParseMessage(raw []byte, account, serverFolder string, uid uint32, seen, fl
 		e.To = []Contact{}
 	}
 	if subj, err := h.Subject(); err == nil && subj != "" {
-		e.Subject = subj
+		e.Subject = fixEncodedWords(subj)
 	} else {
 		e.Subject = "（无主题）"
 	}
@@ -106,6 +101,48 @@ func ParseMessage(raw []byte, account, serverFolder string, uid uint32, seen, fl
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// encodedWordRe 匹配 RFC 2047 编码词（=?charset?B|Q?payload?=）。
+var encodedWordRe = regexp.MustCompile(`=\?([^?]+)\?([BbQq])\?([^?]*)\?=`)
+
+// displayName 返回可读的发件人/收件人名字。
+// 标准库解码失败（如 QQ 邮箱部分邮件的名字是长度不合法的 base64）时会原样保留
+// 编码词，界面上就成了「=?utf-8?B?UVhp…?=」。这里再宽松解码一次，仍解不出来
+// 就退回显示邮箱地址。
+func displayName(name, addr string) string {
+	name = fixEncodedWords(strings.TrimSpace(name))
+	if name == "" || encodedWordRe.MatchString(name) || !utf8.ValidString(name) {
+		name = addr
+	}
+	if name == "" {
+		name = "未知发件人"
+	}
+	return name
+}
+
+// fixEncodedWords 尽力解码 Unicode 编码词：base64 部分补齐填充后再交给标准
+// 解码器；解出的字节不是合法 UTF-8 时丢弃该编码词。
+func fixEncodedWords(s string) string {
+	if !strings.Contains(s, "=?") {
+		return s
+	}
+	dec := &mime.WordDecoder{CharsetReader: message.CharsetReader}
+	return encodedWordRe.ReplaceAllStringFunc(s, func(w string) string {
+		m := encodedWordRe.FindStringSubmatch(w)
+		charset, enc, payload := m[1], strings.ToUpper(m[2]), m[3]
+		if enc == "B" {
+			payload = strings.TrimRight(payload, "=")
+			if r := len(payload) % 4; r > 0 {
+				payload += strings.Repeat("=", 4-r)
+			}
+		}
+		out, err := dec.Decode("=?" + charset + "?" + enc + "?" + payload + "?=")
+		if err != nil || !utf8.ValidString(out) {
+			return ""
+		}
+		return out
+	})
+}
 
 // AttachmentKind 按扩展名（其次 MIME 类型）判断附件图标类别。
 func AttachmentKind(name, contentType string) string {
