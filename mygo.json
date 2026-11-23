@@ -1,11 +1,11 @@
 {
-  "name": "Vela",
-  "identifier": "app.vela.mail",
-  "version": "0.4.1",
-  "icon": "resources/icon.png",
-  "out": "build",
-  "updates": {
-    "publicKey": "H+QEU5AeTeXbvoIQ9zZrWCD/P9yym6l7zYC6rdXWRrc=",
-    "github": "azzliang6/vela"
-  }
+	"name": "Vela",
+	"identifier": "app.vela.mail",
+	"version": "0.4.2",
+	"icon": "resources/icon.png",
+	"out": "build",
+	"updates": {
+		"publicKey": "H+QEU5AeTeXbvoIQ9zZrWCD/P9yym6l7zYC6rdXWRrc=",
+		"github": "azzliang6/vela"
+	}
 }
