@@ -100,9 +100,6 @@ func main() {
 			return ps[0], true
 		},
 	})
-	// 还原备份后把密钥材料写回 mail.key（换机迁移时密钥随备份携带）
-	a.SetKeyStore(core.ConfigDir())
-
 	mygo.App.WhenReady(func() {
 		// 主题来源同步到系统窗口外观：浅色主题下窗口边框/标题栏不再保持深色
 		src := mygo.ThemeSource(a.Settings().Theme)

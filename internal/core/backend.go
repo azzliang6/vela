@@ -4,39 +4,28 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Backend 汇总原 Tauri command 的全部能力，界面直接调用它的方法。
 // 每个方法一一对应 src-tauri 里同名的命令（见 README 的映射表）。
 // 网络方法会阻塞，界面需在 goroutine 里调用。
-// crypto/secret 由互斥锁保护：备份还原会换密钥，监控在后台 goroutine 持续读它。
+// crypto 与 secret 在 OpenBackend 之后不再变化：还原备份不更换本机密钥，
+// 只把备份里的授权码密文重新加密到本机密钥下（见 backup.go）。
 type Backend struct {
 	DB     *DB
-	mu     sync.Mutex
 	crypto *Crypto
 	secret string
+
+	watcher atomic.Pointer[Watcher] // StartWatcher 之后非空；还原后用它立即重扫账户
 }
 
-// Crypto 返回当前加密器（备份还原换密钥后立即生效）。
-func (b *Backend) Crypto() *Crypto {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.crypto
-}
+// Crypto 返回本机密钥对应的加密器。
+func (b *Backend) Crypto() *Crypto { return b.crypto }
 
-// Secret 返回当前密钥材料（导出备份时放进备份文件）。
-func (b *Backend) Secret() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.secret
-}
-
-func (b *Backend) setCrypto(secret string, c *Crypto) {
-	b.mu.Lock()
-	b.secret, b.crypto = secret, c
-	b.mu.Unlock()
-}
+// Secret 返回本机密钥材料：导出时写进备份，还原时用它解开备份里的授权码密文。
+func (b *Backend) Secret() string { return b.secret }
 
 // OpenBackend 打开默认位置（与 Tauri 版相同）的数据库和密钥。
 func OpenBackend() (*Backend, error) {
@@ -56,9 +45,7 @@ func OpenBackend() (*Backend, error) {
 		}
 		c = NewCrypto(secret)
 	}
-	b := &Backend{DB: db}
-	b.setCrypto(secret, c)
-	return b, nil
+	return &Backend{DB: db, crypto: c, secret: secret}, nil
 }
 
 // Providers ← mail_providers
@@ -220,11 +207,14 @@ type Watcher struct {
 	mu      sync.Mutex
 	running map[string]chan struct{}
 	stop    chan struct{}
+	kick    chan struct{} // Rescan 提出的立即重扫请求（缓冲 1，重复请求合并）
 }
 
-// StartWatcher 启动后台监控；每 45 秒重新扫描账户列表。
+// StartWatcher 启动后台监控；每 45 秒重新扫描一次账户列表，Rescan 可以让它立刻重扫。
 func (b *Backend) StartWatcher(onNew func(account string, emails []Email)) *Watcher {
-	w := &Watcher{b: b, onNew: onNew, running: map[string]chan struct{}{}, stop: make(chan struct{})}
+	w := &Watcher{b: b, onNew: onNew, running: map[string]chan struct{}{},
+		stop: make(chan struct{}), kick: make(chan struct{}, 1)}
+	b.watcher.Store(w)
 	go func() {
 		t := time.NewTicker(rescanEvery)
 		defer t.Stop()
@@ -232,12 +222,22 @@ func (b *Backend) StartWatcher(onNew func(account string, emails []Email)) *Watc
 			w.rescan()
 			select {
 			case <-t.C:
+			case <-w.kick:
 			case <-w.stop:
 				return
 			}
 		}
 	}()
 	return w
+}
+
+// Rescan 请求监控线程立刻按最新的账户列表增减连接，不必等下一个扫描周期。
+// 已经停止的 Watcher 上调用没有效果。
+func (w *Watcher) Rescan() {
+	select {
+	case w.kick <- struct{}{}:
+	default: // 已有一次重扫在排队
+	}
 }
 
 // Stop 停止所有监控。
@@ -249,6 +249,7 @@ func (w *Watcher) Stop() {
 		delete(w.running, id)
 	}
 	w.mu.Unlock()
+	w.b.watcher.CompareAndSwap(w, nil)
 }
 
 func (w *Watcher) rescan() {
@@ -283,6 +284,12 @@ func (w *Watcher) watch(id string, stop chan struct{}) {
 		cfg, err := w.b.DB.LoadConfig(id, w.b.Crypto())
 		if err != nil {
 			log.Printf("[vela] 实时监控退出：账户 %s 已不可用", id)
+			// 从运行表里摘掉自己：否则这个账户之后被修好（或被还原覆盖）也不会重新监控
+			w.mu.Lock()
+			if w.running[id] == stop {
+				delete(w.running, id)
+			}
+			w.mu.Unlock()
 			return
 		}
 		before, _ := w.b.DB.LoadCursors(id)
@@ -298,6 +305,12 @@ func (w *Watcher) watch(id string, stop chan struct{}) {
 			continue
 		}
 		backoff = backoffStart
+		select {
+		case <-stop:
+			// 取消信号到达时正在拉取的那一轮：账户已被删除或被还原覆盖，迟到的结果不能写回
+			return
+		default:
+		}
 		if res == nil {
 			continue
 		}

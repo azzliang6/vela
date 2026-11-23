@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// View 构建整个窗口：亚麻侧边栏 | 棉纸邮件列表 | 象牙阅读信笺，外加四个弹窗面板。
+// View 构建整个窗口：亚麻侧边栏 | 棉纸邮件列表 | 象牙阅读信笺，外加五个弹窗面板。
 func (a *App) View(c *ui.Context) {
 	dark := c.Theme().Dark
 	switch a.settings.Theme {
@@ -124,7 +125,7 @@ func senderAvatar(c *ui.Context, name, email string, size float32, dark bool) ui
 	return av
 }
 
-// searchBar 构建支持中文占位符、聚焦暖光环、清空按钮与可选 ⌘K 键帽的搜索框。
+// searchBar 构建支持中文占位符、聚焦暖光环、清空按钮与可选命令面板快捷键键帽的搜索框。
 func searchBar(c *ui.Context, p palette, query *string, placeholder, label string, autoFocus bool, onPalette func()) ui.Element {
 	t := c.Theme()
 	row := ui.Row(c).Gap(8).AlignItems(ui.Center).Padding(8, 12).Radius(10).Background(p.CardBg)
@@ -145,9 +146,9 @@ func searchBar(c *ui.Context, p palette, query *string, placeholder, label strin
 			clr.OnClick(func() { *query = "" })
 		} else if onPalette != nil {
 			kb := ui.ButtonBase(c).Padding(2, 6).Radius(5).Shrink(0).
-				Background(p.KeycapBg).Label("命令面板").Tooltip("打开命令面板 (⌘K)")
+				Background(p.KeycapBg).Label("命令面板").Tooltip("打开命令面板 (" + shortcut("K") + ")")
 			kb.Children(func() {
-				ui.Text(c, "⌘K").FontSize(11).TextColor(t.TextMuted).SingleLine()
+				ui.Text(c, shortcut("K")).FontSize(11).TextColor(t.TextMuted).SingleLine()
 			})
 			kb.OnClick(onPalette)
 		}
@@ -172,6 +173,14 @@ func keycapHint(c *ui.Context, p palette, key, desc string) {
 		})
 		ui.Text(c, desc).FontSize(12).TextColor(t.TextMuted).SingleLine()
 	})
+}
+
+// shortcut 返回快捷键的展示写法，与 ui.Cmd 的实际按键一致：macOS 是 ⌘N，其它平台是 Ctrl+N。
+func shortcut(key string) string {
+	if runtime.GOOS == "darwin" {
+		return "⌘" + key
+	}
+	return "Ctrl+" + key
 }
 
 /* ———— 左侧边栏 ———— */
@@ -199,7 +208,7 @@ func (a *App) sidebar(c *ui.Context, p palette, bar ui.TitleBar) {
 			ui.Icon(c, icon("square-pen")).FontSize(15)
 			ui.Text(c, "写邮件").FontWeight(600).SingleLine()
 			ui.Spacer(c)
-			ui.Text(c, "⌘N").FontSize(11).TextColor(t.AccentText.Alpha(0.75)).SingleLine()
+			ui.Text(c, shortcut("N")).FontSize(11).TextColor(t.AccentText.Alpha(0.75)).SingleLine()
 		}).OnClick(func() { a.StartCompose("new") })
 		pressable(c, composeBtn).Margin(0, 2, 8)
 
@@ -620,9 +629,9 @@ func (a *App) viewer(c *ui.Context, p palette, bar ui.TitleBar) {
 					ui.Text(c, "静下心读信、回信，把收件箱当作一张整洁的书桌").FontSize(12.5).TextColor(t.TextMuted)
 				})
 				ui.Row(c).Gap(14).AlignItems(ui.Center).Margin(6, 0, 0, 0).Children(func() {
-					keycapHint(c, p, "⌘K", "搜索")
-					keycapHint(c, p, "⌘N", "写邮件")
-					keycapHint(c, p, "⌘R", "同步")
+					keycapHint(c, p, shortcut("K"), "搜索")
+					keycapHint(c, p, shortcut("N"), "写邮件")
+					keycapHint(c, p, shortcut("R"), "同步")
 				})
 			})
 			return
@@ -1139,8 +1148,8 @@ func (a *App) paletteView(c *ui.Context, p palette) {
 			shortcut string
 			run      func()
 		}{
-			{"square-pen", "写邮件", "⌘N", func() { a.StartCompose("new") }},
-			{"refresh-cw", "立即同步", "⌘R", a.Sync},
+			{"square-pen", "写邮件", shortcut("N"), func() { a.StartCompose("new") }},
+			{"refresh-cw", "立即同步", shortcut("R"), a.Sync},
 			{"plus", "添加邮箱", "", func() { a.addOpen = true }},
 			{"settings", "设置", "", func() { a.settingsOpen = true }},
 		}

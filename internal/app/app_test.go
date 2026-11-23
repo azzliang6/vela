@@ -183,7 +183,7 @@ func TestComposeNewTyped(t *testing.T) {
 	tt := ui.NewTester(a.View, 1280, 820)
 	tt.Key(ui.Cmd, ui.KeyN)
 	if !a.composeOpen {
-		t.Fatal("⌘N 应打开写信")
+		t.Fatalf("%s 应打开写信", shortcut("N"))
 	}
 	tt.Type("bob@example.org")
 	_ = tt.Click("发送")

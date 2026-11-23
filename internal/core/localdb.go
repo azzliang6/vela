@@ -61,8 +61,9 @@ var extraColumns = []string{
 
 // DB 是本地单文件数据库。SQLite 连接用互斥锁串行化。
 type DB struct {
-	mu sync.Mutex
-	db *sql.DB
+	mu   sync.Mutex
+	db   *sql.DB
+	path string // 数据库文件路径；":memory:" 表示内存库
 }
 
 // OpenDB 打开（必要时创建）数据库并建表。path 为 ":memory:" 时用内存库。
@@ -88,7 +89,7 @@ func OpenDB(path string) (*DB, error) {
 	for _, q := range extraColumns {
 		_, _ = db.Exec(q) // 列已存在时报错，忽略
 	}
-	return &DB{db: db}, nil
+	return &DB{db: db, path: path}, nil
 }
 
 // Close 关闭数据库。

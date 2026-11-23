@@ -86,20 +86,6 @@ func GenerateSecretFile(dir string) (string, error) {
 	return secret, nil
 }
 
-// WriteSecretFile 把已有密钥（如从备份还原的）写入 dir/mail.key（权限 0600）。
-func WriteSecretFile(dir, secret string) error {
-	if strings.TrimSpace(secret) == "" {
-		return errors.New("密钥为空")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("无法创建配置目录：%v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "mail.key"), []byte(secret), 0o600); err != nil {
-		return fmt.Errorf("无法写入密钥文件：%v", err)
-	}
-	return nil
-}
-
 // LoadCrypto 取得加密器，必要时首次生成 mail.key。
 func LoadCrypto(configDir string) (*Crypto, error) {
 	if s, ok := LoadSecret(configDir); ok {

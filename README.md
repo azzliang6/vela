@@ -45,3 +45,10 @@ go tool mygo build -platform windows/amd64,linux/amd64   # 交叉打包（Window
 | `mail.key` | 与系统配置目录下的 `app.vela.mail` 相同 |
 
 升级后已保存的账户和邮件可以直接用，表结构只是增加了几列（`uid`、`remote_name`、`message_id`）。`VELA_DATA_DIR` 会覆盖这两个目录，`VELA_SECRET` 会覆盖密钥。原来存在 WebView localStorage 里的界面设置（AI Key 等）不会迁移，需要重新设置一次。
+
+## 备份与还原
+
+设置里可以把邮箱账户（含授权码）、同步游标、本地邮件和偏好设置导出成一个用密码加密的 `.velabak` 文件，在另一台设备上还原。
+
+- 还原不会更换本机密钥：授权码先用备份里的密钥材料解开，再用本机密钥（`mail.key`，或 `VELA_SECRET`）重新加密后写入，所以用 `VELA_SECRET` 的环境重启之后照常可用。
+- 覆盖之前会把本机当前数据复制一份到数据目录下的 `snapshots/vela-before-restore-<时间>.db`，只保留最近 3 份。想撤销还原，退出 Vela 后用这份副本替换 `vela.db` 即可。

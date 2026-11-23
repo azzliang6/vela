@@ -127,10 +127,10 @@ type App struct {
 	backupErr   string
 	backupBusy  bool
 
-	keyStore  string      // 密钥目录（ConfigDir），还原后把备份携带的 mail.key 写回
-	dialogs   FileDialogs // 系统文件对话框（main 注入，测试用假实现）
+	dialogs   FileDialogs        // 系统文件对话框（main 注入，测试用假实现）
 	themeHook func(theme string) // 主题变更时通知宿主（联动系统标题栏深浅色）
 
+	dataGen        int // 数据被整体替换（还原备份）时递增，之前发起的同步结果据此作废
 	syncing        bool
 	syncedAt       time.Time
 	aiLoading      string
@@ -198,9 +198,6 @@ type FileDialogs struct {
 	// OpenFile 弹出选择文件对话框，返回选择的路径；取消时 ok 为 false。
 	OpenFile func(title string) (path string, ok bool)
 }
-
-// SetKeyStore 注入密钥目录（core.ConfigDir），备份还原用它读写 mail.key。
-func (a *App) SetKeyStore(dir string) { a.keyStore = dir }
 
 // Settings 暴露当前偏好设置（只读快照；主进程启动时读取主题来源用）。
 func (a *App) Settings() Settings { return a.settings }
@@ -435,6 +432,7 @@ func (a *App) Sync() {
 	}
 	a.syncing = true
 	accs := slices.Clone(a.accounts)
+	gen := a.dataGen
 	a.run(func() func() {
 		var outs []core.SyncOutcome
 		for _, acc := range accs {
@@ -444,7 +442,14 @@ func (a *App) Sync() {
 			}
 			outs = append(outs, o)
 		}
-		return func() { a.applySync(outs) }
+		return func() {
+			if gen != a.dataGen {
+				// 还原备份已经把数据整体换掉：这次同步针对的是旧数据，结果不能合并回来
+				a.syncing = false
+				return
+			}
+			a.applySync(outs)
+		}
 	})
 }
 
@@ -531,8 +536,21 @@ func (a *App) prune(account string, present []core.FolderUIDs) {
 	}
 }
 
+// accountLive 判断账户现在是否还存在。以后端的账户表为准而不是用缓存：账户被删除
+// 或被还原覆盖之后，它那条 IDLE 连接迟到的结果不能再写回本地。
+func (a *App) accountLive(id string) bool {
+	accs, err := a.be.ListAccounts()
+	if err != nil {
+		accs = a.accounts
+	}
+	return slices.ContainsFunc(accs, func(x core.MailboxAccount) bool { return x.ID == id })
+}
+
 // OnNewMail 是后台 IDLE 监控推来的新邮件（原 vela://new-mail 事件）。
 func (a *App) OnNewMail(account string, emails []core.Email) {
+	if !a.accountLive(account) {
+		return
+	}
 	added := a.merge(emails)
 	if len(added) == 0 {
 		return

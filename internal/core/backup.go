@@ -10,22 +10,31 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
 // 备份与还原：把邮箱账户（含加密授权码）、同步游标、本地邮件和偏好设置
 // 打包成一个口令加密的文件，方便换机迁移与数据备份。
 //
-// 文件格式（小端）：
-//   偏移 0..6   magic "VELABAK"
-//   偏移 7      格式版本（当前 1）
-//   偏移 8..23  PBKDF2 盐（16 字节随机）
-//   偏移 24..35 AES-GCM nonce（12 字节随机）
-//   偏移 36..   AES-256-GCM 密文（内容为 JSON 信封）
+// 文件格式：
+//
+//	偏移 0..6   magic "VELABAK"
+//	偏移 7      格式版本（当前 1）
+//	偏移 8..23  PBKDF2 盐（16 字节随机）
+//	偏移 24..35 AES-GCM nonce（12 字节随机）
+//	偏移 36..   AES-256-GCM 密文（内容为 JSON 信封）
 //
 // 口令经 PBKDF2-HMAC-SHA256（60 万次迭代）派生密钥。信封里带有 mail.key 的
 // 密钥材料——授权码本身在数据库里是密文，整包再加密一层，因此备份文件
 // 丢了（没有口令）不会泄露授权码；拿到口令的人可以在新设备上完整还原。
+//
+// 还原不更换本机密钥：备份来自另一台设备时，先用备份携带的密钥材料解开
+// 授权码，再用本机密钥（mail.key 或 VELA_SECRET）重新加密后写入。覆盖之前
+// 会给本机当前数据留一份副本（见 DB.SnapshotBeforeRestore）。
 const (
 	backupMagic   = "VELABAK"
 	backupVersion = 1
@@ -37,7 +46,8 @@ const (
 // 测试里会临时调小以保持速度。
 var backupKDFIters = 600_000
 
-// backupAccount 是账户表的原始行（授权码保持密文原样迁移）。
+// backupAccount 是账户表的原始行。授权码是密文：备份的密钥材料与本机不同时，
+// 还原前会换到本机密钥下（见 rekeyAccounts）。
 type backupAccount struct {
 	ID           string          `json:"id"`
 	Email        string          `json:"email"`
@@ -66,11 +76,10 @@ type backupEnvelope struct {
 
 // RestoreResult 是还原后的摘要，界面据此刷新状态。
 type RestoreResult struct {
-	Accounts      int
-	Emails        int
-	SecretChanged bool
-	Secret        string          // 备份携带的密钥材料（SecretChanged 时需写回 mail.key）
-	Settings      json.RawMessage // 备份携带的偏好设置
+	Accounts int
+	Emails   int
+	Settings json.RawMessage // 备份携带的偏好设置
+	Snapshot string          // 覆盖前留下的本机数据副本路径；本机原本没有数据时为空
 }
 
 /* ———— 数据库侧 ———— */
@@ -142,6 +151,95 @@ func (d *DB) ReplaceAll(accounts []backupAccount, emails []Email) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+/* ———— 还原前的数据副本 ———— */
+
+const (
+	snapshotDirName = "snapshots"
+	SnapshotKeep    = 3
+	snapshotPrefix  = "vela-before-restore-"
+)
+
+// SnapshotBeforeRestore 在还原覆盖之前给当前数据留一份完整的副本，返回副本路径。
+// 本机没有任何账户和邮件时不需要留底，返回空串。副本是独立的 SQLite 文件，
+// 授权码仍是密文，密钥材料（mail.key）不在其中。
+func (d *DB) SnapshotBeforeRestore() (string, error) {
+	if d.path == "" || d.path == ":memory:" {
+		return "", nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var rows int
+	if err := d.db.QueryRow(`SELECT (SELECT COUNT(*) FROM mailbox_accounts) + (SELECT COUNT(*) FROM emails)`).Scan(&rows); err != nil {
+		return "", fmt.Errorf("读取本机数据失败：%v", err)
+	}
+	if rows == 0 {
+		return "", nil
+	}
+
+	dir := filepath.Join(filepath.Dir(d.path), snapshotDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("无法创建还原副本目录：%v", err)
+	}
+	path, err := freeSnapshotPath(dir)
+	if err != nil {
+		return "", err
+	}
+	// 持有 d.mu 期间没有其它写入，VACUUM INTO 由 SQLite 保证写出一致的副本
+	if _, err := d.db.Exec("VACUUM INTO ?", path); err != nil {
+		return "", fmt.Errorf("无法创建还原前的数据副本（已取消还原，本机数据未改动）：%v", err)
+	}
+	_ = os.Chmod(path, 0o600)
+	pruneSnapshots(dir)
+	return path, nil
+}
+
+// freeSnapshotPath 选一个不冲突的副本文件名：vela-before-restore-<时间>.db。
+func freeSnapshotPath(dir string) (string, error) {
+	stamp := time.Now().Format("20060102-150405")
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("%s%s.db", snapshotPrefix, stamp)
+		if i > 1 {
+			name = fmt.Sprintf("%s%s-%d.db", snapshotPrefix, stamp, i)
+		}
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return path, nil
+		}
+		if i >= 99 {
+			return "", errors.New("还原副本目录里无法再创建新文件，请清理后重试")
+		}
+	}
+}
+
+// pruneSnapshots 只保留最近 SnapshotKeep 份还原前的副本。
+func pruneSnapshots(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type snapFile struct {
+		path string
+		mod  time.Time
+	}
+	var snaps []snapFile
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.HasPrefix(e.Name(), snapshotPrefix) || !strings.HasSuffix(e.Name(), ".db") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // 刚被别处删掉
+		}
+		snaps = append(snaps, snapFile{filepath.Join(dir, e.Name()), info.ModTime()})
+	}
+	// 按修改时间排：同一秒内的第二份副本文件名带序号后缀，字典序不再是时间序
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].mod.Before(snaps[j].mod) })
+	for _, s := range snaps[:max(0, len(snaps)-SnapshotKeep)] {
+		_ = os.Remove(s.path)
+	}
 }
 
 /* ———— 加密封装 ———— */
@@ -252,8 +350,27 @@ func (b *Backend) ExportBackup(passphrase string, settings json.RawMessage) ([]b
 	return sealBackup(payload, passphrase)
 }
 
-// ImportBackup 解密备份并原子替换全部账户与邮件；密钥与本地不同时热切换
-// 加密器（监控与同步立即使用新密钥，无需重启）。
+// rekeyAccounts 把账户授权码的密文从 from（备份来源设备的密钥）换到 to（本机密钥）下。
+// 任何一个解不开都整体报错，此时尚未写入任何数据。
+func rekeyAccounts(accounts []backupAccount, from, to *Crypto) error {
+	for i := range accounts {
+		pw, err := from.Decrypt(accounts[i].SecretEnc)
+		if err != nil {
+			return fmt.Errorf("备份里 %s 的授权码无法解密（备份来源设备的密钥与数据对不上）；已取消还原，本机数据未改动",
+				accounts[i].Email)
+		}
+		enc, err := to.Encrypt(pw)
+		if err != nil {
+			return err
+		}
+		accounts[i].SecretEnc = enc
+	}
+	return nil
+}
+
+// ImportBackup 解密备份并原子替换全部账户与邮件。本机密钥保持不变：备份来自
+// 别的密钥时，授权码密文先换到本机密钥下再写入。全部步骤都成功后才让后台
+// 监控按新的账户列表重连。
 func (b *Backend) ImportBackup(passphrase string, data []byte) (*RestoreResult, error) {
 	payload, err := openBackup(data, passphrase)
 	if err != nil {
@@ -269,19 +386,25 @@ func (b *Backend) ImportBackup(passphrase string, data []byte) (*RestoreResult, 
 	if env.Secret == "" {
 		return nil, errors.New("备份缺少密钥材料，无法还原授权码")
 	}
+	if env.Secret != b.secret {
+		if err := rekeyAccounts(env.Accounts, NewCrypto(env.Secret), b.crypto); err != nil {
+			return nil, err
+		}
+	}
+	snapshot, err := b.DB.SnapshotBeforeRestore()
+	if err != nil {
+		return nil, err
+	}
 	if err := b.DB.ReplaceAll(env.Accounts, env.Emails); err != nil {
 		return nil, err
 	}
-	changed := false
-	if old := b.Secret(); old != env.Secret {
-		b.setCrypto(env.Secret, NewCrypto(env.Secret))
-		changed = true
+	if w := b.watcher.Load(); w != nil {
+		w.Rescan()
 	}
 	return &RestoreResult{
-		Accounts:      len(env.Accounts),
-		Emails:        len(env.Emails),
-		SecretChanged: changed,
-		Secret:        env.Secret,
-		Settings:      env.Settings,
+		Accounts: len(env.Accounts),
+		Emails:   len(env.Emails),
+		Settings: env.Settings,
+		Snapshot: snapshot,
 	}, nil
 }
