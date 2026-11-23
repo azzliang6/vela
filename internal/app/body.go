@@ -90,21 +90,33 @@ func (a *App) htmlFor(e *core.Email) (html string, ready bool) {
 // docMemo 记住上一次生成的正文文档：清洗上百 KB 的 HTML、算文档哈希都很贵，
 // 每帧都会走到这里，只有邮件、主题或抬头变了才重新生成。
 type docMemo struct {
-	id, src string
-	th      BodyTheme
-	h       MailHeader
-	doc     string
-	key     string
+	id, src   string
+	th        BodyTheme
+	h         MailHeader
+	showImage bool
+	doc       string
+	key       string
 }
 
 func (a *App) mailDocument(id, src string, th BodyTheme, h MailHeader) (doc, key string) {
 	m := &a.docMemo
-	if m.doc != "" && m.id == id && m.src == src && m.th == th && sameHeader(m.h, h) {
+	show := a.showImages[id]
+	if m.doc != "" && m.id == id && m.src == src && m.th == th && m.showImage == show && sameHeader(m.h, h) {
 		return m.doc, m.key
 	}
-	doc, _ = MailDocument(src, th, h)
-	*m = docMemo{id: id, src: src, th: th, h: h, doc: doc, key: docKey(doc)}
+	doc, _ = MailDocumentOpts(src, th, h, show)
+	*m = docMemo{id: id, src: src, th: th, h: h, showImage: show, doc: doc, key: docKey(doc)}
 	return m.doc, m.key
+}
+
+// ShowImages 让当前邮件加载远程图片（用户点了正文里的「已阻止远程图片」）。
+func (a *App) ShowImages(id string) {
+	if a.showImages == nil {
+		a.showImages = map[string]bool{}
+	}
+	a.showImages[id] = true
+	a.docMemo = docMemo{} // 丢掉缓存，下一帧用放行图片的策略重新生成
+	a.rev++
 }
 
 func sameHeader(x, y MailHeader) bool {

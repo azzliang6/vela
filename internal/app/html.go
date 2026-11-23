@@ -96,7 +96,7 @@ func docKey(doc string) string {
 	return fmt.Sprintf("%x", h.Sum64())
 }
 
-func headerHTML(h MailHeader, dark bool, remote bool) string {
+func headerHTML(h MailHeader, dark bool, remote, showImages bool) string {
 	esc := html.EscapeString
 	var b strings.Builder
 	b.WriteString(`<header class="vela-h"><h1>` + esc(h.Subject) + `</h1><div class="vela-from">`)
@@ -132,7 +132,11 @@ func headerHTML(h MailHeader, dark bool, remote bool) string {
 		b.WriteString(`</div>`)
 	}
 	if remote {
-		b.WriteString(`<div class="vela-blocked">已阻止远程图片以保护隐私</div>`)
+		if showImages {
+			b.WriteString(`<div class="vela-blocked">已加载远程图片</div>`)
+		} else {
+			b.WriteString(`<a class="vela-blocked" href="` + ShowImagesURL + `">已阻止远程图片 · 点此显示</a>`)
+		}
 	}
 	b.WriteString(`</header>`)
 	return b.String()
@@ -144,6 +148,14 @@ func headerHTML(h MailHeader, dark bool, remote bool) string {
 const MailCSP = "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; " +
 	"img-src data: cid:; style-src 'unsafe-inline'; font-src data:"
 
+// MailCSPImages 与 MailCSP 相同，但允许加载远程图片（用户点了「显示图片」之后）。
+const MailCSPImages = "default-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; " +
+	"img-src data: cid: https: http:; style-src 'unsafe-inline'; font-src data:"
+
+// ShowImagesURL 是正文里「显示图片」链接的地址，由 main.go 的 OnWillNavigate 拦截，
+// 不会真的跳转。改用自定义协议而不是 vela-app://，WebView 各平台都能解析。
+const ShowImagesURL = "vela:show-images"
+
 // MaxDocBytes 是交给 WebView 的文档上限。WebView2 的 NavigateToString 限 2MB，
 // 超过时界面改用纯文本。
 const MaxDocBytes = 1_500_000
@@ -154,6 +166,12 @@ var remoteImg = regexp.MustCompile(`(?i)(<img[^>]+src\s*=\s*["']?\s*(https?:)?//
 // 外层（html/body）的底色强制等于阅读区底色，邮件内部自己的样式保持不变。
 // remote 表示原文引用了被阻止的远程图片。
 func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bool) {
+	return MailDocumentOpts(src, th, h, false)
+}
+
+// MailDocumentOpts 同 MailDocument；showImages 为 true 时允许加载远程图片
+// （用户在看到「已阻止远程图片」后主动点了「显示图片」）。
+func MailDocumentOpts(src string, th BodyTheme, h MailHeader, showImages bool) (doc string, remote bool) {
 	clean := mailPolicy().Sanitize(src)
 	remote = remoteImg.MatchString(clean)
 	scheme := "light"
@@ -175,7 +193,7 @@ func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bo
 		"::-webkit-scrollbar-button{display:none}" +
 		"}" +
 		".vela-wrap{font:14.5px/1.72 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;word-wrap:break-word;overflow-wrap:anywhere}" +
-		".vela-h{max-width:820px;padding:28px 36px 20px;border-bottom:1px solid " + subtleBorder + ";font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;color:" + th.Text + "}" +
+		".vela-h{max-width:820px;margin:0 auto;padding:28px 36px 20px;border-bottom:1px solid " + subtleBorder + ";font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Noto Sans CJK SC','Microsoft YaHei',sans-serif;color:" + th.Text + "}" +
 		".vela-h h1{font-size:23px;line-height:1.35;letter-spacing:-0.01em;margin:0 0 14px;font-weight:700}" +
 		".vela-from{display:flex;align-items:center;gap:12px}.vela-who{flex:1;min-width:0}" +
 		".vela-sender{font-size:14px;line-height:1.4}.vela-addr{color:" + th.Muted + ";font-weight:400;font-size:13px}" +
@@ -185,14 +203,18 @@ func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bo
 		".vela-ai-t{font-size:12px;font-weight:700;letter-spacing:0.02em;color:" + th.Accent + ";margin-bottom:4px}" +
 		".vela-ai-s{font-size:13.5px;line-height:1.55}.vela-ai-w{margin-top:4px}" +
 		".vela-att{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}.vela-att span{font-size:12.5px;padding:6px 12px;background:" + cardBg + ";border:1px solid " + th.Border + ";border-radius:9px}" +
-		".vela-blocked{display:inline-block;margin-top:10px;padding:3px 10px;border-radius:999px;font-size:11.5px;color:" + th.Muted + ";background:" + cardBg + ";border:1px solid " + th.Border + "}" +
-		".vela-body{max-width:820px;padding:22px 36px 44px}.vela-body a{color:" + th.Accent + ";text-underline-offset:2px}.vela-body img{max-width:100%;height:auto;border-radius:6px}.vela-body table{max-width:100%}" +
+		".vela-blocked{display:inline-block;margin-top:10px;padding:3px 10px;border-radius:999px;font-size:11.5px;color:" + th.Muted + ";background:" + cardBg + ";border:1px solid " + th.Border + ";text-decoration:none;cursor:pointer}.vela-blocked:hover{color:" + th.Accent + ";border-color:" + accentBorder + "}" +
+		".vela-body{max-width:820px;margin:0 auto;padding:22px 36px 44px}.vela-body a{color:" + th.Accent + ";text-underline-offset:2px}.vela-body img{max-width:100%;height:auto;border-radius:6px}.vela-body table{max-width:100%}" +
 		".vela-body blockquote{margin:8px 0 8px 2px;padding:2px 0 2px 14px;border-left:3px solid " + th.Border + ";color:" + th.Muted + "}"
+	csp := MailCSP
+	if showImages {
+		csp = MailCSPImages
+	}
 	doc = "<!doctype html><html><head><meta charset=\"utf-8\">" +
-		"<meta http-equiv=\"Content-Security-Policy\" content=\"" + MailCSP + "\">" +
+		"<meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">" +
 		"<meta name=\"color-scheme\" content=\"" + scheme + "\">" +
 		"<meta name=\"viewport\" content=\"width=device-width\">" +
-		"<style>" + css + "</style></head><body><div class=\"vela-wrap\">" + headerHTML(h, th.Dark, remote) +
+		"<style>" + css + "</style></head><body><div class=\"vela-wrap\">" + headerHTML(h, th.Dark, remote, showImages) +
 		"<div class=\"vela-body\">" + clean + "</div></div></body></html>"
 	return doc, remote
 }

@@ -275,7 +275,7 @@ func categoryLabel(id string) string {
 func (a *App) navItem(c *ui.Context, p palette, id, label, ic string, count int) {
 	t := c.Theme()
 	on := a.folder == id
-	row := ui.Row(c.Key("nav-" + id)).Gap(10).AlignItems(ui.Center).Padding(8, 11).Radius(9).Role(ui.RoleButton).Label(label)
+	row := ui.Row(c.Key("nav-"+id)).Gap(10).AlignItems(ui.Center).Padding(8, 11).Radius(9).Role(ui.RoleButton).Label(label)
 	icCol := t.TextMuted
 	txtCol := p.TextSoft
 	if on {
@@ -306,7 +306,7 @@ func (a *App) categoryItem(c *ui.Context, p palette, id, label string) {
 	t := c.Theme()
 	on := a.folder == id
 	dot := categoryColor(id, t.Dark)
-	row := ui.Row(c.Key("nav-" + id)).Gap(11).AlignItems(ui.Center).Padding(7, 13).Radius(9).Role(ui.RoleButton).Label(label)
+	row := ui.Row(c.Key("nav-"+id)).Gap(11).AlignItems(ui.Center).Padding(7, 13).Radius(9).Role(ui.RoleButton).Label(label)
 	txtCol := p.TextSoft
 	if on {
 		txtCol = t.Text
@@ -328,7 +328,7 @@ func (a *App) categoryItem(c *ui.Context, p palette, id, label string) {
 func (a *App) accountItem(c *ui.Context, p palette, id, label string) {
 	t := c.Theme()
 	on := a.account == id
-	row := ui.Row(c.Key("acc-" + id)).Gap(9).AlignItems(ui.Center).Padding(7, 11).Radius(9).Role(ui.RoleButton).Label(label)
+	row := ui.Row(c.Key("acc-"+id)).Gap(9).AlignItems(ui.Center).Padding(7, 11).Radius(9).Role(ui.RoleButton).Label(label)
 	txtCol := p.TextSoft
 	if on {
 		txtCol = t.Text
@@ -422,7 +422,7 @@ func (a *App) mailList(c *ui.Context, p palette, bar ui.TitleBar) {
 		})
 		ui.Box(c).Height(1).Background(p.SubtleDivider)
 
-		listBox := ui.Column(c.Key("list-" + a.folder + a.account)).Grow(1).AlignItems(ui.Stretch).Padding(6, 0)
+		listBox := ui.Column(c.Key("list-"+a.folder+a.account)).Grow(1).AlignItems(ui.Stretch).Padding(6, 0)
 		folderSwitch(c, listBox)
 		listBox.Children(func() {
 			state := &ui.ListState{
@@ -744,7 +744,7 @@ func (a *App) detail(c *ui.Context, p palette, e *core.Email, bar ui.TitleBar) {
 	// 纯文本：抬头与正文在同一个原生滚动视图里，保持舒适的书页行宽
 	ui.Scroll(c).Grow(1).Children(func() {
 		a.nativeHeader(c, p, e)
-		ui.Column(c).MaxWidth(820).Padding(22, 36, 44).Gap(14).Children(func() {
+		ui.Column(c).MaxWidth(820).AlignSelf(ui.Center).Padding(22, 36, 44).Gap(14).Children(func() {
 			for _, para := range strings.Split(strings.TrimSpace(text), "\n\n") {
 				if strings.TrimSpace(para) == "" {
 					continue
@@ -758,7 +758,7 @@ func (a *App) detail(c *ui.Context, p palette, e *core.Email, bar ui.TitleBar) {
 // nativeHeader 是纯文本正文的原生信笺抬头。
 func (a *App) nativeHeader(c *ui.Context, p palette, e *core.Email) {
 	t := c.Theme()
-	ui.Column(c).MaxWidth(820).Padding(28, 36, 20).Gap(14).Children(func() {
+	ui.Column(c).MaxWidth(820).AlignSelf(ui.Center).Padding(28, 36, 20).Gap(14).Children(func() {
 		ui.Text(c, nonEmpty(e.Subject, "（无主题）")).FontSize(23).Bold().LineHeight(1.35).LetterSpacing(-0.2).Selectable()
 
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
@@ -1090,7 +1090,9 @@ func (a *App) settingsView(c *ui.Context, p palette) {
 						})
 					}
 					inputRow("API 地址", func() { ui.TextInput(c, &s.AIBaseURL).Grow(1).Label("API 地址") })
-					inputRow("API Key", func() { ui.TextInput(c, &s.AIKey).Password().Placeholder("填入密钥后启用 AI 摘要").Grow(1).Label("API Key") })
+					inputRow("API Key", func() {
+						ui.TextInput(c, &s.AIKey).Password().Placeholder("填入密钥后启用 AI 摘要").Grow(1).Label("API Key")
+					})
 					inputRow("模型名称", func() { ui.TextInput(c, &s.AIModel).Grow(1).Label("模型") })
 					inputRow("摘要语言", func() { ui.TextInput(c, &s.AILanguage).Grow(1).Label("摘要语言") })
 				})
@@ -1187,8 +1189,14 @@ func (a *App) paletteView(c *ui.Context, p palette) {
 		}
 		if a.backuper() != nil {
 			cmds = append(cmds,
-				struct{ icon, label, shortcut string; run func() }{"archive", "导出备份", "", a.StartBackupExport},
-				struct{ icon, label, shortcut string; run func() }{"archive", "从备份还原", "", a.StartBackupImport})
+				struct {
+					icon, label, shortcut string
+					run                   func()
+				}{"archive", "导出备份", "", a.StartBackupExport},
+				struct {
+					icon, label, shortcut string
+					run                   func()
+				}{"archive", "从备份还原", "", a.StartBackupImport})
 		}
 
 		var visibleCmds []int
@@ -1205,7 +1213,7 @@ func (a *App) paletteView(c *ui.Context, p palette) {
 					for _, idx := range visibleCmds {
 						cmd := cmds[idx]
 						run := cmd.run
-						r := ui.Row(c.Key("cmd-" + cmd.label)).Gap(10).AlignItems(ui.Center).
+						r := ui.Row(c.Key("cmd-"+cmd.label)).Gap(10).AlignItems(ui.Center).
 							Padding(8, 10).Radius(9).Role(ui.RoleButton).Label(cmd.label)
 						r.Children(func() {
 							ui.Box(c).Size(26, 26).Radius(7).Center().Background(p.HoverWash).Children(func() {
@@ -1228,7 +1236,7 @@ func (a *App) paletteView(c *ui.Context, p palette) {
 						TextColor(t.TextMuted).Padding(10, 10, 4)
 					for _, e := range hits {
 						id := e.ID
-						r := ui.Row(c.Key("hit-" + id)).Gap(10).AlignItems(ui.Center).
+						r := ui.Row(c.Key("hit-"+id)).Gap(10).AlignItems(ui.Center).
 							Padding(8, 10).Radius(9).Role(ui.RoleButton).Label(e.Subject)
 						r.Children(func() {
 							senderAvatar(c, e.From.Name, e.From.Email, 28, t.Dark)

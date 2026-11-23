@@ -441,3 +441,27 @@ func TestViewPassesPaneColorAndHeader(t *testing.T) {
 		}
 	}
 }
+
+// 点「显示图片」后：文档改用放行远程图片的 CSP，并且保持居中。
+func TestShowImagesReloadsDocument(t *testing.T) {
+	a, _ := newTestApp()
+	src := `<p>x</p><img src="https://t.example/p.gif">`
+	th := BodyThemeFor(velaTheme(false))
+	h := MailHeader{Subject: "S"}
+	doc, _ := a.mailDocument("m1", src, th, h)
+	if !strings.Contains(doc, "已阻止远程图片") || !strings.Contains(doc, MailCSP) {
+		t.Fatalf("默认应阻止远程图片：%s", doc)
+	}
+	a.ShowImages("m1")
+	doc, _ = a.mailDocument("m1", src, th, h)
+	if !strings.Contains(doc, MailCSPImages) || strings.Contains(doc, MailCSP+"\">") {
+		t.Fatalf("显示图片后应放行远程图片：%s", doc)
+	}
+	if !strings.Contains(doc, "已加载远程图片") {
+		t.Fatalf("应提示图片已加载：%s", doc)
+	}
+	// 抬头与正文居中，最大化窗口时不会挤在左边
+	if !strings.Contains(doc, ".vela-body{max-width:820px;margin:0 auto") {
+		t.Fatal("正文应居中")
+	}
+}
