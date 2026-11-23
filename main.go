@@ -154,13 +154,15 @@ func main() {
 			TitleBarStyle: mygo.TitleBarHidden,
 			Content:       ui.View(a.View),
 		})
-		// 关窗 = 隐藏到托盘，实时监控继续
+		// 关窗 = 隐藏到托盘，实时监控继续；但应用要退出（托盘「退出」、
+		// 更新后 Relaunch 重启）时必须放行，否则窗口只是隐藏，进程一直活着。
 		win.OnClose(func(e *mygo.CloseEvent) {
 			if !quitting {
 				e.PreventDefault()
 				win.Hide()
 			}
 		})
+		mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { quitting = true })
 
 		body := &webBody{post: win.Update, timeout: 8 * time.Second}
 		body.onFail = func(id string) { a.MarkBodyFailed(id); win.Invalidate() }
