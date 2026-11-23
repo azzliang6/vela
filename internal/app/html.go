@@ -148,11 +148,52 @@ const MaxDocBytes = 1_500_000
 
 var remoteImg = regexp.MustCompile(`(?i)(<img[^>]+src\s*=\s*["']?\s*(https?:)?//)|url\(\s*["']?\s*(https?:)?//`)
 
-// MailDocument 把邮件 HTML 清洗后包成完整文档：抬头 + 正文，注入跟随应用主题的基础样式。
-// 外层（html/body）的底色强制等于阅读区底色，邮件内部自己的样式保持不变。
-// remote 表示原文引用了远程图片。
+// 字体回退处理分两处：内联 style="…" 属性与 <style> 块。
+// 邮件通常只写 Helvetica/Arial 一类西文字体，中文就会回退到宋体——Windows 上
+// 小字号发虚、横细竖粗，很难看。这里在每个字体列表后面补上中文字体。
+
+var (
+	styleAttrRe  = regexp.MustCompile(`(?i)(style\s*=\s*")([^"]*)(")`)
+	styleBlockRe = regexp.MustCompile(`(?is)(<style[^>]*>)(.*?)(</style>)`)
+	fontFamilyRe = regexp.MustCompile(`(?i)(font-family\s*:\s*)([^;}]+)`)
+)
+
+// cjkFallback 是追加的中文字体回退（不含前面的逗号）。
+const cjkFallback = `"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", "Hiragino Sans GB", sans-serif`
+
+// fixFontFamilies 给邮件声明的每个字体列表补上中文字体回退。
+func fixFontFamilies(s string) string {
+	fix := func(m string) string {
+		sub := fontFamilyRe.FindStringSubmatch(m)
+		decl := strings.ToLower(sub[2])
+		for _, has := range []string{"yahei", "pingfang", "noto sans", "source han", "hiragino",
+			"inherit", "initial", "unset", "revert"} {
+			if strings.Contains(decl, has) {
+				return m // 已经是中文友好的字体列表（或不是字体列表）
+			}
+		}
+		val := strings.TrimRight(sub[2], " ")
+		imp := ""
+		if i := strings.LastIndex(strings.ToLower(val), "!important"); i >= 0 {
+			val, imp = strings.TrimRight(val[:i], " "), " !important"
+		}
+		return sub[1] + val + ", " + cjkFallback + imp
+	}
+	// <style> 块：值是 CSS，允许出现引号
+	s = styleBlockRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := styleBlockRe.FindStringSubmatch(m)
+		return sub[1] + fontFamilyRe.ReplaceAllStringFunc(sub[2], fix) + sub[3]
+	})
+	// 内联 style 属性：扫描器已把属性值统一成双引号
+	s = styleAttrRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := styleAttrRe.FindStringSubmatch(m)
+		return sub[1] + fontFamilyRe.ReplaceAllStringFunc(sub[2], fix) + sub[3]
+	})
+	return s
+}
+
 func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bool) {
-	clean := mailPolicy().Sanitize(src)
+	clean := fixFontFamilies(mailPolicy().Sanitize(src))
 	remote = remoteImg.MatchString(clean)
 	scheme := "light"
 	if th.Dark {
@@ -185,7 +226,7 @@ func MailDocument(src string, th BodyTheme, h MailHeader) (doc string, remote bo
 		".vela-att{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}.vela-att span{font-size:12.5px;padding:6px 12px;background:" + cardBg + ";border:1px solid " + th.Border + ";border-radius:9px}" +
 		".vela-body{max-width:820px;margin:0 auto;padding:22px 36px 44px}.vela-body a{color:" + th.Accent + ";text-underline-offset:2px}.vela-body img{max-width:100%;height:auto;border-radius:6px}.vela-body table{max-width:100%}" +
 		".vela-body blockquote{margin:8px 0 8px 2px;padding:2px 0 2px 14px;border-left:3px solid " + th.Border + ";color:" + th.Muted + "}"
-	doc = "<!doctype html><html><head><meta charset=\"utf-8\">" +
+	doc = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
 		"<meta http-equiv=\"Content-Security-Policy\" content=\"" + MailCSP + "\">" +
 		"<meta name=\"color-scheme\" content=\"" + scheme + "\">" +
 		"<meta name=\"viewport\" content=\"width=device-width\">" +

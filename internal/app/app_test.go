@@ -459,3 +459,18 @@ func TestMailDocumentLoadsRemoteImages(t *testing.T) {
 		t.Fatal("正文应居中")
 	}
 }
+
+// 邮件只声明西文字体时补上中文字体回退，避免 Windows 上回退到宋体。
+func TestMailDocumentAddsCJKFallback(t *testing.T) {
+	doc, _ := MailDocument(`<div style="font-family: Helvetica, Arial">x</div>`, BodyThemeFor(velaTheme(false)), MailHeader{Subject: "S"})
+	if !strings.Contains(doc, `font-family: Helvetica, Arial, "PingFang SC"`) {
+		t.Fatalf("内联字体列表应补中文回退：%s", doc)
+	}
+	if !strings.Contains(doc, `html lang="zh-CN"`) {
+		t.Fatal("文档应声明中文语言，影响字体选择与断行")
+	}
+	fixed := fixFontFamilies(`<style>p{font-family:'Microsoft YaHei',sans-serif}</style>`)
+	if strings.Count(fixed, "PingFang SC") != 0 {
+		t.Fatalf("已含中文字体时不应再追加：%s", fixed)
+	}
+}
