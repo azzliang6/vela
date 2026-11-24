@@ -270,3 +270,15 @@ func TestSyncEachParallel(t *testing.T) {
 		}
 	}
 }
+
+// Date 缺失或无法解析时日期留空（由 INTERNALDATE/当前时间兜底），非 RFC 格式尽力解析。
+func TestParseMessageDateFallback(t *testing.T) {
+	e, _ := ParseMessage([]byte("Date: December 10, 2024 12:00:00 +0800\r\nFrom: a@b.com\r\n\r\nx"), "a", "inbox", 1, false, false, "INBOX")
+	if e.Date != "2024-12-10T12:00:00+08:00" {
+		t.Fatalf("非 RFC 日期应尽力解析：%q", e.Date)
+	}
+	e, _ = ParseMessage([]byte("Date: not-a-date\r\nFrom: a@b.com\r\n\r\nx"), "a", "inbox", 1, false, false, "INBOX")
+	if e.Date != "" {
+		t.Fatalf("无法解析的日期应留空：%q", e.Date)
+	}
+}

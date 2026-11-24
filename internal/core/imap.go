@@ -173,7 +173,7 @@ func (s *session) download(folder, account, serverFolder string, items []uidMeta
 		meta[it.uid] = it
 	}
 	section := &imap.FetchItemBodySection{Peek: true}
-	msgs, err := s.c.Fetch(set, &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{section}}).Collect()
+	msgs, err := s.c.Fetch(set, &imap.FetchOptions{UID: true, InternalDate: true, BodySection: []*imap.FetchItemBodySection{section}}).Collect()
 	if err != nil {
 		return fmt.Errorf("下载 %s 邮件正文失败：%v", folder, err)
 	}
@@ -185,6 +185,11 @@ func (s *session) download(folder, account, serverFolder string, items []uidMeta
 		}
 		mt := meta[uint32(m.UID)]
 		mail, err := ParseMessage(raw, account, serverFolder, uint32(m.UID), mt.seen, mt.flagged, folder)
+		// IMAP INTERNALDATE 是服务器收到邮件的时刻：邮件自己的 Date 缺失或无法解析时用它，
+		// 而不是同步时间——否则历史邮件会在列表里挤到最上面。
+		if err == nil && (mail.Date == "" || strings.HasPrefix(mail.Date, "0001")) && !m.InternalDate.IsZero() {
+			mail.Date = m.InternalDate.UTC().Format(time.RFC3339)
+		}
 		if err != nil {
 			out.Skipped++
 			continue

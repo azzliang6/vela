@@ -53,10 +53,20 @@ func ParseMessage(raw []byte, account, serverFolder string, uid uint32, seen, fl
 	if mid, err := h.MessageID(); err == nil && mid != "" {
 		e.MessageID = mid // 与 Rust mail-parser 一致：不带尖括号
 	}
+	// 常见非 RFC 5322 格式也尝试一下；都不行就留空，让调用方用 IMAP INTERNALDATE
+	// 兜底（那是邮件到达服务器的时间），而不是同步时间——否则历史邮件会挤到列表最上面。
 	if d, err := h.Date(); err == nil && !d.IsZero() {
 		e.Date = d.Format(time.RFC3339)
-	} else {
-		e.Date = time.Now().UTC().Format(time.RFC3339)
+	} else if raw := strings.TrimSpace(h.Get("Date")); raw != "" {
+		for _, layout := range []string{
+			"January 2, 2006 15:04:05 -0700", "2006-01-02 15:04:05", "2-Jan-2006 15:04:05 -0700",
+			"Mon Jan 2 15:04:05 2006",
+		} {
+			if d, err := time.Parse(layout, raw); err == nil && !d.IsZero() {
+				e.Date = d.Format(time.RFC3339)
+				break
+			}
+		}
 	}
 
 	var text, html string
